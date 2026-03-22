@@ -419,8 +419,7 @@ func (b *Bot) handleStrategyChat(chatID int64, text string) {
 		return
 	}
 
-	// Send in chunks if too long
-	b.sendLong(chatID, response)
+	b.sendAI(chatID, response)
 }
 
 func (b *Bot) handleEndStrategy(chatID int64) {
@@ -491,7 +490,7 @@ func (b *Bot) handleAnalyze(chatID int64, args string) {
 		return
 	}
 
-	b.sendLong(chatID, response)
+	b.sendAI(chatID, response)
 }
 
 // ── Helpers ───────────────────────────────────────────────────────────────
@@ -511,13 +510,17 @@ func (b *Bot) sendMD(chatID int64, text string) {
 	}
 }
 
+// sendAI converts AI markdown response to Telegram-friendly format and sends it
+func (b *Bot) sendAI(chatID int64, text string) {
+	converted := convertAIResponse(text)
+	b.sendLong(chatID, converted)
+}
+
 func (b *Bot) sendLong(chatID int64, text string) {
-	// Telegram max message length is 4096
 	const maxLen = 4000
 	for len(text) > 0 {
 		chunk := text
 		if len(chunk) > maxLen {
-			// Find last newline before maxLen
 			cut := strings.LastIndex(text[:maxLen], "\n")
 			if cut < 0 {
 				cut = maxLen
@@ -529,6 +532,97 @@ func (b *Bot) sendLong(chatID int64, text string) {
 		}
 		b.send(chatID, chunk)
 	}
+}
+
+// convertAIResponse converts standard Markdown from AI to plain readable text
+// that looks clean in Telegram without parse mode
+func convertAIResponse(text string) string {
+	lines := strings.Split(text, "\n")
+	var out []string
+
+	inCodeBlock := false
+	for _, line := range lines {
+		// Code blocks — keep as-is with indent
+		if strings.HasPrefix(line, "```") {
+			inCodeBlock = !inCodeBlock
+			if inCodeBlock {
+				out = append(out, "▸ Code:")
+			}
+			continue
+		}
+		if inCodeBlock {
+			out = append(out, "  "+line)
+			continue
+		}
+
+		// Headers: ### → bold-like with emoji prefix
+		if strings.HasPrefix(line, "#### ") {
+			line = "◆ " + strings.TrimPrefix(line, "#### ")
+		} else if strings.HasPrefix(line, "### ") {
+			line = "\n▌ " + strings.ToUpper(strings.TrimPrefix(line, "### "))
+		} else if strings.HasPrefix(line, "## ") {
+			line = "\n━━━━━━━━━━━━━━━━\n" + strings.ToUpper(strings.TrimPrefix(line, "## ")) + "\n━━━━━━━━━━━━━━━━"
+		} else if strings.HasPrefix(line, "# ") {
+			line = "\n🔷 " + strings.ToUpper(strings.TrimPrefix(line, "# ")) + "\n"
+		}
+
+		// Bold **text** → just remove markers (keep text)
+		for strings.Contains(line, "**") {
+			start := strings.Index(line, "**")
+			end := strings.Index(line[start+2:], "**")
+			if end < 0 {
+				break
+			}
+			inner := line[start+2 : start+2+end]
+			line = line[:start] + inner + line[start+2+end+2:]
+		}
+
+		// Italic *text* or _text_ → keep text
+		for strings.Contains(line, "*") {
+			start := strings.Index(line, "*")
+			end := strings.Index(line[start+1:], "*")
+			if end < 0 {
+				break
+			}
+			inner := line[start+1 : start+1+end]
+			line = line[:start] + inner + line[start+1+end+1:]
+		}
+
+		// Inline code `text` → keep as-is (readable)
+		// Table rows | col | col | → indent them
+		if strings.HasPrefix(strings.TrimSpace(line), "|") {
+			// Skip separator rows like |---|---|
+			if strings.Contains(line, "---") {
+				continue
+			}
+			// Format table row
+			cells := strings.Split(line, "|")
+			var parts []string
+			for _, c := range cells {
+				c = strings.TrimSpace(c)
+				if c != "" {
+					parts = append(parts, c)
+				}
+			}
+			if len(parts) > 0 {
+				line = "  " + strings.Join(parts, " | ")
+			}
+		}
+
+		// Horizontal rules
+		if strings.TrimSpace(line) == "---" || strings.TrimSpace(line) == "---" {
+			line = "────────────────"
+		}
+
+		out = append(out, line)
+	}
+
+	result := strings.Join(out, "\n")
+	// Collapse 3+ blank lines to 2
+	for strings.Contains(result, "\n\n\n\n") {
+		result = strings.ReplaceAll(result, "\n\n\n\n", "\n\n\n")
+	}
+	return strings.TrimSpace(result)
 }
 
 func parseOptions(parts []string) map[string]string {
