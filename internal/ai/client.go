@@ -41,10 +41,13 @@ type ContentBlock struct {
 	Text string `json:"text,omitempty"`
 }
 
-// rawResponse captures all possible response shapes from the proxy
+// rawResponse captures all possible response shapes from the proxy.
+// The "error" field may be a plain string OR a JSON object depending on
+// which layer (proxy vs Anthropic) is returning the error, so we use
+// json.RawMessage and extract it manually.
 type rawResponse struct {
-	ID      string         `json:"id"`
-	Content []ContentBlock `json:"content"`
+	ID      string            `json:"id"`
+	Content []ContentBlock    `json:"content"`
 
 	// Proxy wraps Anthropic errors here
 	AnthropicError *struct {
@@ -52,11 +55,38 @@ type rawResponse struct {
 		Message string `json:"message"`
 	} `json:"anthropic_error,omitempty"`
 
-	// Proxy itself may return plain "error" string (e.g. JSON parse proxy errors)
-	ProxyError string `json:"error,omitempty"`
+	// "error" can be a plain string OR an object like {"type":"...","message":"..."}
+	RawError json.RawMessage `json:"error,omitempty"`
 
 	// Some proxies wrap in "message" field
 	ProxyMessage string `json:"message,omitempty"`
+}
+
+// extractError reads RawError which may be a JSON string or a JSON object
+func extractError(raw json.RawMessage) string {
+	if len(raw) == 0 {
+		return ""
+	}
+	// Try plain string first
+	var s string
+	if err := json.Unmarshal(raw, &s); err == nil {
+		return s
+	}
+	// Try object with "message" field
+	var obj struct {
+		Message string `json:"message"`
+		Error   string `json:"error"`
+	}
+	if err := json.Unmarshal(raw, &obj); err == nil {
+		if obj.Message != "" {
+			return obj.Message
+		}
+		if obj.Error != "" {
+			return obj.Error
+		}
+	}
+	// Fallback: return raw JSON as string
+	return string(raw)
 }
 
 // Session manages per-chat conversation history with mutex protection
@@ -141,8 +171,8 @@ func (c *Client) doRequest(req Request, timeout time.Duration) (string, error) {
 	if r.AnthropicError != nil {
 		return "", fmt.Errorf("[%s] %s", r.AnthropicError.Type, r.AnthropicError.Message)
 	}
-	if r.ProxyError != "" {
-		return "", fmt.Errorf("proxy error: %s", r.ProxyError)
+	if proxyErr := extractError(r.RawError); proxyErr != "" {
+		return "", fmt.Errorf("proxy error: %s", proxyErr)
 	}
 	if r.ProxyMessage != "" && len(r.Content) == 0 {
 		return "", fmt.Errorf("API message: %s", r.ProxyMessage)
