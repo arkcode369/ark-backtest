@@ -25,11 +25,11 @@ type ThinkingConfig struct {
 }
 
 type Request struct {
-	Model    string         `json:"model"`
-	Messages []Message      `json:"messages"`
-	System   string         `json:"system,omitempty"`
-	Thinking ThinkingConfig `json:"thinking,omitempty"`
-	MaxTokens int           `json:"max_tokens"`
+	Model     string          `json:"model"`
+	Messages  []Message       `json:"messages"`
+	System    string          `json:"system,omitempty"`
+	Thinking  *ThinkingConfig `json:"thinking,omitempty"` // pointer so omitempty works on nil
+	MaxTokens int             `json:"max_tokens"`
 }
 
 type ContentBlock struct {
@@ -114,7 +114,7 @@ func (c *Client) ChatWithThinking(system string, messages []Message, maxTokens, 
 		Model:    ModelID,
 		Messages: messages,
 		System:   system,
-		Thinking: ThinkingConfig{
+		Thinking: &ThinkingConfig{
 			Type:         "enabled",
 			BudgetTokens: thinkingBudget,
 		},
