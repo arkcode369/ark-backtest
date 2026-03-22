@@ -450,7 +450,10 @@ func (b *Bot) handleGenMD(chatID int64, args string) {
 		sanitizeFilename(stratName),
 	)
 
-	storageDir := "/home/computer/storage"
+	storageDir := os.Getenv("STORAGE_DIR")
+	if storageDir == "" {
+		storageDir = "/storage"
+	}
 	os.MkdirAll(storageDir, 0755)
 	filepath_ := filepath.Join(storageDir, filename)
 

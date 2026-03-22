@@ -1,0 +1,7 @@
+.env
+bin/
+storage/
+.git/
+*.md
+trading-backtest-bot
+cmd/test/
