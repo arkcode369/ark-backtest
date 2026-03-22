@@ -36,8 +36,8 @@ type Trade struct {
 type SignalType int
 
 const (
-	NoSignal  SignalType = 0
-	BuySignal SignalType = 1
+	NoSignal   SignalType = 0
+	BuySignal  SignalType = 1
 	SellSignal SignalType = -1
 )
 
@@ -54,13 +54,13 @@ type Strategy interface {
 // ── Engine configuration ──────────────────────────────────────────────────
 
 type Config struct {
-	InitialCapital float64
+	InitialCapital  float64
 	PositionSizePct float64 // % of capital per trade (e.g. 0.02 = 2%)
-	Commission      float64 // per trade flat fee in USD
+	Commission      float64 // round-trip commission in USD (charged once at exit)
 	Slippage        float64 // in price units
 	StopLossPct     float64 // 0 = disabled
 	TakeProfitPct   float64 // 0 = disabled
-	MaxOpenTrades   int     // 0 = unlimited
+	MaxOpenTrades   int     // reserved for future multi-position support; currently unused
 	Symbol          string
 	Interval        string
 }
@@ -145,6 +145,7 @@ func (e *Engine) Run(params map[string]float64) (*Result, error) {
 
 	for i := 1; i < len(e.bars); i++ {
 		bar := e.bars[i]
+		sig := e.strategy.Signal(i) // compute once per bar
 
 		// ── Manage open position ─────────────────────────────
 		if openPos != nil {
@@ -194,13 +195,13 @@ func (e *Engine) Run(params map[string]float64) (*Result, error) {
 
 			// Check strategy signal for exit
 			if exitReason == "" {
-				sig := e.strategy.Signal(i)
+				// BUG-01 fix: slippage works AGAINST trader on exit
 				if openPos.Direction == Long && sig == SellSignal {
 					exitReason = "Signal"
-					exitPrice = bar.Open + e.cfg.Slippage
+					exitPrice = bar.Open - e.cfg.Slippage
 				} else if openPos.Direction == Short && sig == BuySignal {
 					exitReason = "Signal"
-					exitPrice = bar.Open - e.cfg.Slippage
+					exitPrice = bar.Open + e.cfg.Slippage
 				}
 			}
 
@@ -212,6 +213,7 @@ func (e *Engine) Run(params map[string]float64) (*Result, error) {
 				} else {
 					pnl = (openPos.EntryPrice - exitPrice) * openPos.Quantity
 				}
+				// BUG-15 fix: commission represents round-trip cost, charged once at exit
 				pnl -= e.cfg.Commission
 				pnlPct := pnl / (openPos.EntryPrice * openPos.Quantity) * 100
 
@@ -230,18 +232,17 @@ func (e *Engine) Run(params map[string]float64) (*Result, error) {
 				}
 				trades = append(trades, t)
 				capital += pnl
-				equityCurve = append(equityCurve, capital)
 				openPos = nil
 			}
 		}
 
 		// ── Check for entry signal ───────────────────────────
+		// BUG-04 fix: only check openPos == nil, don't check completed trade count
 		if openPos == nil {
-			maxOpen := e.cfg.MaxOpenTrades
-			if maxOpen == 0 || len(trades) < maxOpen {
-				sig := e.strategy.Signal(i)
-				if sig != NoSignal {
-					entryPrice := bar.Close + float64(sig)*e.cfg.Slippage
+			if sig != NoSignal {
+				// BUG-10 fix: use bar.Open for entry (consistent with exit pricing)
+				entryPrice := bar.Open + float64(sig)*e.cfg.Slippage
+				if entryPrice > 0 {
 					qty := (capital * e.cfg.PositionSizePct) / entryPrice
 
 					var sl, tp float64
@@ -273,9 +274,23 @@ func (e *Engine) Run(params map[string]float64) (*Result, error) {
 						StopLoss:   sl,
 						TakeProfit: tp,
 					}
-					capital -= e.cfg.Commission
+					// BUG-15 fix: removed entry-side commission deduction;
+					// commission is charged as round-trip cost at exit only
 				}
 			}
+		}
+
+		// BUG-07 fix: per-bar mark-to-market equity curve
+		if openPos != nil {
+			var unrealizedPnL float64
+			if openPos.Direction == Long {
+				unrealizedPnL = (bar.Close - openPos.EntryPrice) * openPos.Quantity
+			} else {
+				unrealizedPnL = (openPos.EntryPrice - bar.Close) * openPos.Quantity
+			}
+			equityCurve = append(equityCurve, capital+unrealizedPnL)
+		} else {
+			equityCurve = append(equityCurve, capital)
 		}
 	}
 
@@ -289,6 +304,7 @@ func (e *Engine) Run(params map[string]float64) (*Result, error) {
 		} else {
 			pnl = (openPos.EntryPrice - exitPrice) * openPos.Quantity
 		}
+		// Round-trip commission charged at exit
 		pnl -= e.cfg.Commission
 		pnlPct := pnl / (openPos.EntryPrice * openPos.Quantity) * 100
 
@@ -306,7 +322,8 @@ func (e *Engine) Run(params map[string]float64) (*Result, error) {
 			Reason:     "EOD",
 		})
 		capital += pnl
-		equityCurve = append(equityCurve, capital)
+		// Update the last equity curve entry to reflect the closed position
+		equityCurve[len(equityCurve)-1] = capital
 	}
 
 	return computeStats(e, trades, equityCurve, capital), nil
@@ -325,7 +342,7 @@ func computeStats(e *Engine, trades []Trade, equity []float64, finalCapital floa
 	if len(e.bars) > 0 {
 		r.StartDate = e.bars[0].Time
 		r.EndDate = e.bars[len(e.bars)-1].Time
-		r.Period = fmt.Sprintf("%s → %s", r.StartDate.Format("2006-01-02"), r.EndDate.Format("2006-01-02"))
+		r.Period = fmt.Sprintf("%s -> %s", r.StartDate.Format("2006-01-02"), r.EndDate.Format("2006-01-02"))
 	}
 
 	r.TotalTrades = len(trades)
@@ -382,8 +399,9 @@ func computeStats(e *Engine, trades []Trade, equity []float64, finalCapital floa
 		r.ProfitFactor = math.Inf(1)
 	}
 
-	// Max Drawdown
+	// BUG-06 fix: Max Drawdown percentage uses peak equity at point of max drawdown
 	peak := equity[0]
+	peakAtMaxDD := peak
 	for _, eq := range equity {
 		if eq > peak {
 			peak = eq
@@ -391,19 +409,20 @@ func computeStats(e *Engine, trades []Trade, equity []float64, finalCapital floa
 		dd := peak - eq
 		if dd > r.MaxDrawdown {
 			r.MaxDrawdown = dd
+			peakAtMaxDD = peak
 		}
 	}
-	if e.cfg.InitialCapital > 0 {
-		r.MaxDrawdownPct = r.MaxDrawdown / e.cfg.InitialCapital * 100
+	if peakAtMaxDD > 0 {
+		r.MaxDrawdownPct = r.MaxDrawdown / peakAtMaxDD * 100
 	}
 
-	// Sharpe Ratio (simplified, annualized)
-	r.SharpeRatio = computeSharpe(trades)
+	// BUG-08 fix: Sharpe Ratio annualized using trades-per-year instead of sqrt(252)
+	r.SharpeRatio = computeSharpe(trades, r.StartDate, r.EndDate)
 
 	return r
 }
 
-func computeSharpe(trades []Trade) float64 {
+func computeSharpe(trades []Trade, startDate, endDate time.Time) float64 {
 	if len(trades) < 2 {
 		return 0
 	}
@@ -428,44 +447,47 @@ func computeSharpe(trades []Trade) float64 {
 	if std == 0 {
 		return 0
 	}
-	return (mean / std) * math.Sqrt(252) // annualized
+
+	// Compute actual trading days and trades-per-year for proper annualization
+	totalDays := endDate.Sub(startDate).Hours() / 24
+	if totalDays <= 0 {
+		return 0
+	}
+	years := totalDays / 365.25
+	tradesPerYear := float64(len(trades)) / years
+
+	return (mean / std) * math.Sqrt(tradesPerYear)
 }
 
 // FormatResult returns a human-readable summary of the backtest result
 func FormatResult(r *Result, initialCapital float64) string {
-	pf := "∞"
+	pf := "\u221e"
 	if !math.IsInf(r.ProfitFactor, 1) {
 		pf = fmt.Sprintf("%.2f", r.ProfitFactor)
 	}
 
-	return fmt.Sprintf(`📊 *Backtest Result*
-
-*Symbol:* %s | *Interval:* %s
-*Strategy:* %s
-*Period:* %s
-*Bars:* N/A
-
-💰 *Capital*
-  Initial: $%.2f
-  Final:   $%.2f (%.2f%%)
-  Net P&L: $%.2f
-
-📈 *Performance*
-  Total Trades: %d
-  Win Rate: %.1f%% (%d W / %d L)
-  Profit Factor: %s
-  Sharpe Ratio: %.2f
-
-📉 *Drawdown*
-  Max DD: $%.2f (%.2f%%)
-
-⚡ *Trade Stats*
-  Avg Win:  $%.2f
-  Avg Loss: $%.2f
-  Largest Win:  $%.2f
-  Largest Loss: $%.2f
-  Max Consec. Wins: %d
-  Max Consec. Loss: %d`,
+	return fmt.Sprintf("\U0001f4ca *Backtest Result*\n\n"+
+		"*Symbol:* %s | *Interval:* %s\n"+
+		"*Strategy:* %s\n"+
+		"*Period:* %s\n\n"+
+		"\U0001f4b0 *Capital*\n"+
+		"  Initial: $%.2f\n"+
+		"  Final:   $%.2f (%.2f%%)\n"+
+		"  Net P&L: $%.2f\n\n"+
+		"\U0001f4c8 *Performance*\n"+
+		"  Total Trades: %d\n"+
+		"  Win Rate: %.1f%% (%d W / %d L)\n"+
+		"  Profit Factor: %s\n"+
+		"  Sharpe Ratio: %.2f\n\n"+
+		"\U0001f4c9 *Drawdown*\n"+
+		"  Max DD: $%.2f (%.2f%%)\n\n"+
+		"\u26a1 *Trade Stats*\n"+
+		"  Avg Win:  $%.2f\n"+
+		"  Avg Loss: $%.2f\n"+
+		"  Largest Win:  $%.2f\n"+
+		"  Largest Loss: $%.2f\n"+
+		"  Max Consec. Wins: %d\n"+
+		"  Max Consec. Loss: %d",
 		r.Symbol, r.Interval,
 		r.Strategy,
 		r.Period,

@@ -1,7 +1,9 @@
 package bot
 
 import (
+	"context"
 	"fmt"
+	"log/slog"
 	"math"
 	"os"
 	"path/filepath"
@@ -22,6 +24,7 @@ type Bot struct {
 	stratCreator  *strategy.Creator
 	mu            sync.Mutex
 	stratSessions map[int64]bool // chats in strategy creation mode (mutex-protected)
+	sem           chan struct{}   // semaphore to limit concurrent goroutines
 }
 
 func New(token string) (*Bot, error) {
@@ -33,6 +36,7 @@ func New(token string) (*Bot, error) {
 		api:           api,
 		stratCreator:  strategy.NewCreator(),
 		stratSessions: make(map[int64]bool),
+		sem:           make(chan struct{}, 20),
 	}, nil
 }
 
@@ -63,7 +67,11 @@ func (b *Bot) Run() {
 		if update.Message == nil {
 			continue
 		}
-		go b.handleMessage(update.Message)
+		go func() {
+			b.sem <- struct{}{}
+			defer func() { <-b.sem }()
+			b.handleMessage(update.Message)
+		}()
 	}
 }
 
@@ -150,7 +158,7 @@ func (b *Bot) sendHelp(chatID int64) {
 		"  `pos=0.02` — position size % (default: 2%)\n" +
 		"  `sl=0.02` — stop loss % (default: disabled)\n" +
 		"  `tp=0.04` — take profit % (default: disabled)\n" +
-		"  `commission=5` — per-trade commission USD (default: 0)\n" +
+		"  `commission=5` — round-trip commission USD (default: 0)\n" +
 		"  `period=1y` — data period (default: 1y)\n\n" +
 		"*Data Limits:*\n" +
 		"  1m: 7d | 5m-30m: 60d | 1h: 2yr | 1d: 10yr+"
@@ -161,7 +169,10 @@ func (b *Bot) sendHelp(chatID int64) {
 // ── /symbols ──────────────────────────────────────────────────────────────
 
 func (b *Bot) handleSymbols(chatID int64, args string) {
-	cat := strings.Title(strings.ToLower(args))
+	cat := ""
+	if args != "" {
+		cat = strings.ToUpper(args[:1]) + strings.ToLower(args[1:])
+	}
 
 	cats := map[string][]string{
 		"Metals":  {"XAUUSD", "XAGUSD", "COPPER", "PALLADIUM", "PLATINUM"},
@@ -218,7 +229,8 @@ func (b *Bot) handlePrice(chatID int64, args string) {
 
 	b.send(chatID, "⏳ Fetching price...")
 
-	price, currency, err := data.FetchLatestPrice(sym)
+	ctx := context.Background()
+	price, currency, err := data.FetchLatestPrice(ctx, sym)
 	if err != nil {
 		b.send(chatID, fmt.Sprintf("❌ Error fetching price for %s: %v", sym, err))
 		return
@@ -304,6 +316,34 @@ func (b *Bot) handleBacktest(chatID int64, args string) {
 	commission := getOptFloat(opts, "commission", 0)
 	period := getOptStr(opts, "period", defaultPeriod(interval))
 
+	// Validate engine config params
+	if capital <= 0 {
+		b.send(chatID, "❌ Invalid parameter: capital must be > 0")
+		return
+	}
+	if posSizePct <= 0 || posSizePct > 1 {
+		b.send(chatID, "❌ Invalid parameter: pos (position size) must be between 0 and 1 (e.g., 0.02 for 2%)")
+		return
+	}
+	if slPct < 0 || slPct > 1 {
+		b.send(chatID, "❌ Invalid parameter: sl (stop loss) must be between 0 and 1 (e.g., 0.02 for 2%)")
+		return
+	}
+	if tpPct < 0 || tpPct > 1 {
+		b.send(chatID, "❌ Invalid parameter: tp (take profit) must be between 0 and 1 (e.g., 0.04 for 4%)")
+		return
+	}
+	if commission < 0 {
+		b.send(chatID, "❌ Invalid parameter: commission must be >= 0")
+		return
+	}
+
+	// Validate strategy-specific params
+	if err := validateParams(stratParams); err != nil {
+		b.send(chatID, fmt.Sprintf("❌ Invalid strategy parameter: %v", err))
+		return
+	}
+
 	// Validate symbol
 	symInfo, ok := data.GetSymbol(symbolKey)
 	if !ok {
@@ -332,7 +372,8 @@ func (b *Bot) handleBacktest(chatID int64, args string) {
 	b.send(chatID, fmt.Sprintf("⏳ Fetching %s data (%s, %s)...", symbolKey, interval, period))
 
 	// Fetch data
-	bars, err := data.FetchOHLCV(data.FetchParams{
+	ctx := context.Background()
+	bars, err := data.FetchOHLCV(ctx, data.FetchParams{
 		Symbol:   symbolKey,
 		Interval: interval,
 		Period:   period,
@@ -436,7 +477,8 @@ func (b *Bot) handleStrategyMode(chatID int64, args string) {
 func (b *Bot) handleStrategyChat(chatID int64, text string) {
 	b.send(chatID, "🤔 Thinking...")
 
-	response, err := b.stratCreator.Chat(chatID, text)
+	ctx := context.Background()
+	response, err := b.stratCreator.Chat(ctx, chatID, text)
 	if err != nil {
 		b.send(chatID, fmt.Sprintf("❌ AI error: %v", err))
 		return
@@ -460,7 +502,8 @@ func (b *Bot) handleGenMD(chatID int64, args string) {
 
 	b.send(chatID, "📝 Generating strategy document with extended thinking... (this may take 30-60s)")
 
-	md, err := b.stratCreator.GenerateStrategyMD(chatID, stratName)
+	ctx := context.Background()
+	md, err := b.stratCreator.GenerateStrategyMD(ctx, chatID, stratName)
 	if err != nil {
 		b.send(chatID, fmt.Sprintf("❌ Error generating document: %v", err))
 		return
@@ -510,7 +553,8 @@ func (b *Bot) handleAnalyze(chatID int64, args string) {
 
 	b.send(chatID, "🔍 Analyzing...")
 
-	response, err := b.stratCreator.QuickAnalysis(args)
+	ctx := context.Background()
+	response, err := b.stratCreator.QuickAnalysis(ctx, args)
 	if err != nil {
 		b.send(chatID, fmt.Sprintf("❌ AI error: %v", err))
 		return
@@ -523,7 +567,9 @@ func (b *Bot) handleAnalyze(chatID int64, args string) {
 
 func (b *Bot) send(chatID int64, text string) {
 	msg := tgbotapi.NewMessage(chatID, text)
-	b.api.Send(msg)
+	if _, err := b.api.Send(msg); err != nil {
+		slog.Error("failed to send message", "chatID", chatID, "error", err)
+	}
 }
 
 func (b *Bot) sendMD(chatID int64, text string) {
@@ -649,6 +695,26 @@ func convertAIResponse(text string) string {
 		result = strings.ReplaceAll(result, "\n\n\n\n", "\n\n\n")
 	}
 	return strings.TrimSpace(result)
+}
+
+// validateParams checks that strategy-specific parameters are reasonable.
+func validateParams(params map[string]float64) error {
+	periodKeys := map[string]bool{
+		"period": true, "fast": true, "slow": true, "signal": true,
+		"sma_period": true, "rsi_period": true,
+	}
+	for k, v := range params {
+		if v <= 0 {
+			return fmt.Errorf("%s must be > 0 (got %.4g)", k, v)
+		}
+		if periodKeys[k] && v < 2 {
+			return fmt.Errorf("%s must be >= 2 (got %.4g)", k, v)
+		}
+		if periodKeys[k] && v > 10000 {
+			return fmt.Errorf("%s is unreasonably large (got %.4g), must be < 10000", k, v)
+		}
+	}
+	return nil
 }
 
 func parseOptions(parts []string) map[string]string {

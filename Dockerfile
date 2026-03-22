@@ -18,18 +18,18 @@ RUN CGO_ENABLED=0 GOOS=linux GOARCH=amd64 \
     go build -ldflags="-w -s" -o /app/bot ./cmd/main.go
 
 # ── Stage 2: Runtime ─────────────────────────────────────────────────────────
-FROM scratch
+FROM alpine:3.19
 
-# Copy CA certs (needed for HTTPS to Yahoo Finance & Telegram)
-COPY --from=builder /etc/ssl/certs/ca-certificates.crt /etc/ssl/certs/
-
-# Copy timezone data
-COPY --from=builder /usr/share/zoneinfo /usr/share/zoneinfo
+# Install CA certs and timezone data
+RUN apk add --no-cache ca-certificates tzdata
 
 # Copy binary
 COPY --from=builder /app/bot /bot
 
 # Storage volume mountpoint (for generated .md strategy files)
+RUN mkdir -p /storage && adduser -D -H botuser && chown botuser /storage
+USER botuser
+
 VOLUME ["/storage"]
 
 ENV TZ=Asia/Jakarta

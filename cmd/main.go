@@ -4,6 +4,8 @@ import (
 	"fmt"
 	"log"
 	"os"
+	"os/signal"
+	"syscall"
 	"trading-backtest-bot/internal/bot"
 
 	"github.com/joho/godotenv"
@@ -28,5 +30,19 @@ func main() {
 		log.Fatalf("❌ Failed to create bot: %v", err)
 	}
 
-	b.Run()
+	// TODO: Replace log with structured logging (e.g., slog or zerolog) for production use.
+
+	// Graceful shutdown: listen for SIGINT and SIGTERM
+	sigCh := make(chan os.Signal, 1)
+	signal.Notify(sigCh, syscall.SIGINT, syscall.SIGTERM)
+
+	// Run the bot in a goroutine since b.Run() blocks on the Telegram update channel
+	go func() {
+		b.Run()
+	}()
+
+	// Block until a shutdown signal is received
+	sig := <-sigCh
+	log.Printf("Received signal %v, shutting down gracefully...", sig)
+	os.Exit(0)
 }

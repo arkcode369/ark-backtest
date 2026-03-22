@@ -1,5 +1,7 @@
 package data
 
+import "strings"
+
 // Symbol defines a tradeable instrument
 type Symbol struct {
 	Ticker      string // Yahoo Finance ticker
@@ -76,8 +78,12 @@ var IntervalMaxHistory = map[string]string{
 
 // GetSymbol looks up a symbol by user-provided key (case-insensitive)
 func GetSymbol(key string) (Symbol, bool) {
+	// try as-is first
+	if s, ok := SymbolMap[key]; ok {
+		return s, true
+	}
 	// try uppercase
-	s, ok := SymbolMap[key]
+	s, ok := SymbolMap[strings.ToUpper(key)]
 	return s, ok
 }
 

@@ -1,6 +1,7 @@
 package strategy
 
 import (
+	"context"
 	"fmt"
 	"strings"
 	"sync"
@@ -33,17 +34,46 @@ Data intervals: 1m (7d max), 5m/15m/30m (60d), 1h (2yr), 1d (10yr+)
 
 Built-in strategies: ema_cross, rsi, macd, bb_breakout, supertrend, donchian, sma_rsi`
 
+const (
+	sessionCleanupInterval = 30 * time.Minute
+	sessionMaxIdleTime     = 1 * time.Hour
+)
+
+// sessionEntry wraps a session with a last-used timestamp for TTL cleanup
+type sessionEntry struct {
+	session  *ai.Session
+	lastUsed time.Time
+}
+
 // Creator handles AI-powered strategy creation and analysis
 type Creator struct {
 	client   *ai.Client
 	mu       sync.Mutex
-	sessions map[int64]*ai.Session // chat_id → thread-safe session
+	sessions map[int64]*sessionEntry // chat_id → session entry with TTL tracking
 }
 
 func NewCreator() *Creator {
-	return &Creator{
+	c := &Creator{
 		client:   ai.NewClient(),
-		sessions: make(map[int64]*ai.Session),
+		sessions: make(map[int64]*sessionEntry),
+	}
+	go c.cleanupLoop()
+	return c
+}
+
+// cleanupLoop periodically removes sessions idle for more than sessionMaxIdleTime
+func (c *Creator) cleanupLoop() {
+	ticker := time.NewTicker(sessionCleanupInterval)
+	defer ticker.Stop()
+	for range ticker.C {
+		c.mu.Lock()
+		now := time.Now()
+		for chatID, entry := range c.sessions {
+			if now.Sub(entry.lastUsed) > sessionMaxIdleTime {
+				delete(c.sessions, chatID)
+			}
+		}
+		c.mu.Unlock()
 	}
 }
 
@@ -51,27 +81,41 @@ func NewCreator() *Creator {
 func (c *Creator) getOrCreate(chatID int64) *ai.Session {
 	c.mu.Lock()
 	defer c.mu.Unlock()
-	if _, ok := c.sessions[chatID]; !ok {
-		c.sessions[chatID] = ai.NewSession()
+	entry, ok := c.sessions[chatID]
+	if !ok {
+		entry = &sessionEntry{
+			session:  ai.NewSession(),
+			lastUsed: time.Now(),
+		}
+		c.sessions[chatID] = entry
+	} else {
+		entry.lastUsed = time.Now()
 	}
-	return c.sessions[chatID]
+	return entry.session
 }
 
 // Chat sends a message in the strategy creation conversation
-func (c *Creator) Chat(chatID int64, userMessage string) (string, error) {
+func (c *Creator) Chat(ctx context.Context, chatID int64, userMessage string) (string, error) {
 	sess := c.getOrCreate(chatID)
 
 	sess.Append(ai.Message{Role: "user", Content: userMessage})
 
 	msgs := sess.Snapshot()
-	response, err := c.client.Chat(systemPrompt, msgs, 4096)
+	response, err := c.client.Chat(ctx, systemPrompt, msgs, 4096)
 	if err != nil {
-		// Remove the last user message so user can retry
-		sess.Reset()
-		// Restore previous messages minus the failed one
-		for _, m := range msgs[:len(msgs)-1] {
-			sess.Append(m)
+		// Atomic rollback: create a new session with all messages except the last
+		// (the failed user message), then swap it in under the lock.
+		rollbackMsgs := msgs[:len(msgs)-1]
+		newSess := ai.NewSession()
+		for _, m := range rollbackMsgs {
+			newSess.Append(m)
 		}
+		c.mu.Lock()
+		if entry, ok := c.sessions[chatID]; ok {
+			entry.session = newSess
+			entry.lastUsed = time.Now()
+		}
+		c.mu.Unlock()
 		return "", err
 	}
 
@@ -87,7 +131,7 @@ func (c *Creator) ResetSession(chatID int64) {
 }
 
 // GenerateStrategyMD generates a full strategy document in Markdown
-func (c *Creator) GenerateStrategyMD(chatID int64, strategyName string) (string, error) {
+func (c *Creator) GenerateStrategyMD(ctx context.Context, chatID int64, strategyName string) (string, error) {
 	sess := c.getOrCreate(chatID)
 
 	prompt := fmt.Sprintf(`Based on our conversation, generate a complete trading strategy document in Markdown for: "%s"
@@ -127,10 +171,10 @@ Generated: %s`, strategyName, strategyName, time.Now().Format("2006-01-02 15:04"
 	msgs := append(history, ai.Message{Role: "user", Content: prompt})
 
 	// Try with thinking first (budget=2048, max_tokens=4096 — conservative)
-	response, err := c.client.ChatWithThinking(systemPrompt, msgs, 4096, 2048)
+	response, err := c.client.ChatWithThinking(ctx, systemPrompt, msgs, 4096, 2048)
 	if err != nil {
 		// Fallback: without thinking
-		response, err = c.client.Chat(systemPrompt, msgs, 4096)
+		response, err = c.client.Chat(ctx, systemPrompt, msgs, 4096)
 		if err != nil {
 			return "", fmt.Errorf("strategy generation failed: %w", err)
 		}
@@ -140,7 +184,7 @@ Generated: %s`, strategyName, strategyName, time.Now().Format("2006-01-02 15:04"
 }
 
 // AnalyzeBacktestResult uses AI to analyze backtest results
-func (c *Creator) AnalyzeBacktestResult(chatID int64, result *backtest.Result, symbol data.Symbol) (string, error) {
+func (c *Creator) AnalyzeBacktestResult(ctx context.Context, chatID int64, result *backtest.Result, symbol data.Symbol) (string, error) {
 	pf := fmt.Sprintf("%.2f", result.ProfitFactor)
 	if result.ProfitFactor > 999 {
 		pf = "∞"
@@ -168,14 +212,14 @@ Give: assessment, strengths, weaknesses, and 3 specific improvements.`,
 		result.MaxConsecWins, result.MaxConsecLoss,
 	)
 
-	return c.Chat(chatID, summary)
+	return c.Chat(ctx, chatID, summary)
 }
 
 // QuickAnalysis does a one-shot AI analysis without session context
-func (c *Creator) QuickAnalysis(prompt string) (string, error) {
+func (c *Creator) QuickAnalysis(ctx context.Context, prompt string) (string, error) {
 	if strings.TrimSpace(prompt) == "" {
 		return "", fmt.Errorf("empty prompt")
 	}
 	messages := []ai.Message{{Role: "user", Content: prompt}}
-	return c.client.Chat(systemPrompt, messages, 2048)
+	return c.client.Chat(ctx, systemPrompt, messages, 2048)
 }

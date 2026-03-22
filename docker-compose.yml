@@ -9,6 +9,8 @@ services:
 
     environment:
       - TELEGRAM_TOKEN=${TELEGRAM_TOKEN}
+      - AI_ENDPOINT=${AI_ENDPOINT:-}
+      - AI_MODEL=${AI_MODEL:-}
       - TZ=Asia/Jakarta
 
     volumes:
@@ -17,7 +19,7 @@ services:
 
     # Health check — confirm process is alive
     healthcheck:
-      test: ["CMD-SHELL", "pgrep bot || exit 1"]
+      test: ["CMD-SHELL", "kill -0 1 || exit 1"]
       interval: 30s
       timeout: 10s
       retries: 3

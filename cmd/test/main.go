@@ -1,6 +1,7 @@
 package main
 
 import (
+	"context"
 	"fmt"
 	"trading-backtest-bot/internal/backtest"
 	"trading-backtest-bot/internal/data"
@@ -9,7 +10,8 @@ import (
 
 func main() {
 	fmt.Println("=== Testing Data Fetch ===")
-	bars, err := data.FetchOHLCV(data.FetchParams{
+	ctx := context.Background()
+	bars, err := data.FetchOHLCV(ctx, data.FetchParams{
 		Symbol:   "XAUUSD",
 		Interval: "1d",
 		Period:   "1y",
@@ -39,7 +41,7 @@ func main() {
 
 	fmt.Println("\n=== Testing Multiple Symbols ===")
 	for _, sym := range []string{"NQ", "EURUSD", "CL", "XAGUSD"} {
-		b, err := data.FetchOHLCV(data.FetchParams{Symbol: sym, Interval: "1d", Period: "30d"})
+		b, err := data.FetchOHLCV(ctx, data.FetchParams{Symbol: sym, Interval: "1d", Period: "30d"})
 		if err != nil {
 			fmt.Printf("  %s: ERROR - %v\n", sym, err)
 		} else {

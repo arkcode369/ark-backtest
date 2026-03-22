@@ -1,5 +1,12 @@
 .env
 bin/
+trading-backtest-bot
 *.exe
 *.test
 .DS_Store
+storage/
+.vscode/
+.idea/
+coverage.out
+*.coverprofile
+vendor/

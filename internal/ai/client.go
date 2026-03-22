@@ -2,21 +2,42 @@ package ai
 
 import (
 	"bytes"
+	"context"
 	"encoding/json"
 	"fmt"
 	"io"
 	"net/http"
+	"os"
 	"sync"
 	"time"
 )
 
-const (
-	EndpointURL     = "https://marketriskmonitor.com/api/analyze"
-	ModelID         = "claude-opus-4-6"
-	defaultTimeout  = 90 * time.Second  // regular chat
-	thinkingTimeout = 180 * time.Second // extended thinking needs more time
-	minThinkingBudget = 1024            // API minimum for budget_tokens
+var (
+	EndpointURL = "https://marketriskmonitor.com/api/analyze"
+	ModelID     = "claude-opus-4-6"
 )
+
+const (
+	defaultTimeout    = 90 * time.Second  // regular chat
+	thinkingTimeout   = 180 * time.Second // extended thinking needs more time
+	minThinkingBudget = 1024              // API minimum for budget_tokens
+)
+
+// sharedHTTPClient is reused across all requests to enable connection pooling.
+// Per-request timeouts are enforced via context.WithTimeout rather than
+// client-level Timeout, so the client uses a generous base timeout.
+var sharedHTTPClient = &http.Client{
+	Timeout: 5 * time.Minute, // generous upper bound; real deadlines come from ctx
+}
+
+func init() {
+	if v := os.Getenv("AI_ENDPOINT"); v != "" {
+		EndpointURL = v
+	}
+	if v := os.Getenv("AI_MODEL"); v != "" {
+		ModelID = v
+	}
+}
 
 type Message struct {
 	Role    string `json:"role"`
@@ -46,8 +67,8 @@ type ContentBlock struct {
 // which layer (proxy vs Anthropic) is returning the error, so we use
 // json.RawMessage and extract it manually.
 type rawResponse struct {
-	ID      string            `json:"id"`
-	Content []ContentBlock    `json:"content"`
+	ID      string         `json:"id"`
+	Content []ContentBlock `json:"content"`
 
 	// Proxy wraps Anthropic errors here
 	AnthropicError *struct {
@@ -122,22 +143,26 @@ type Client struct{}
 
 func NewClient() *Client { return &Client{} }
 
-// doRequest executes an API call with the given timeout
-func (c *Client) doRequest(req Request, timeout time.Duration) (string, error) {
+// doRequest executes an API call with the given per-request timeout.
+// The provided context is wrapped with context.WithTimeout; callers can
+// also use the parent context for cancellation.
+func (c *Client) doRequest(ctx context.Context, req Request, timeout time.Duration) (string, error) {
+	ctx, cancel := context.WithTimeout(ctx, timeout)
+	defer cancel()
+
 	body, err := json.Marshal(req)
 	if err != nil {
 		return "", fmt.Errorf("marshal error: %w", err)
 	}
 
-	httpReq, err := http.NewRequest("POST", EndpointURL, bytes.NewReader(body))
+	httpReq, err := http.NewRequestWithContext(ctx, "POST", EndpointURL, bytes.NewReader(body))
 	if err != nil {
 		return "", fmt.Errorf("build request error: %w", err)
 	}
 	httpReq.Header.Set("Content-Type", "application/json")
 	httpReq.Header.Set("Accept", "application/json")
 
-	httpClient := &http.Client{Timeout: timeout}
-	resp, err := httpClient.Do(httpReq)
+	resp, err := sharedHTTPClient.Do(httpReq)
 	if err != nil {
 		return "", fmt.Errorf("request failed (timeout=%v): %w", timeout, err)
 	}
@@ -199,7 +224,7 @@ func (c *Client) doRequest(req Request, timeout time.Duration) (string, error) {
 }
 
 // Chat sends a regular request (no extended thinking)
-func (c *Client) Chat(system string, messages []Message, maxTokens int) (string, error) {
+func (c *Client) Chat(ctx context.Context, system string, messages []Message, maxTokens int) (string, error) {
 	if len(messages) == 0 {
 		return "", fmt.Errorf("messages cannot be empty")
 	}
@@ -209,12 +234,12 @@ func (c *Client) Chat(system string, messages []Message, maxTokens int) (string,
 		System:    system,
 		MaxTokens: maxTokens,
 	}
-	return c.doRequest(req, defaultTimeout)
+	return c.doRequest(ctx, req, defaultTimeout)
 }
 
 // ChatWithThinking sends a request with extended thinking.
 // Falls back to regular Chat if thinking fails.
-func (c *Client) ChatWithThinking(system string, messages []Message, maxTokens, thinkingBudget int) (string, error) {
+func (c *Client) ChatWithThinking(ctx context.Context, system string, messages []Message, maxTokens, thinkingBudget int) (string, error) {
 	if len(messages) == 0 {
 		return "", fmt.Errorf("messages cannot be empty")
 	}
@@ -232,5 +257,5 @@ func (c *Client) ChatWithThinking(system string, messages []Message, maxTokens, 
 		},
 		MaxTokens: maxTokens,
 	}
-	return c.doRequest(req, thinkingTimeout)
+	return c.doRequest(ctx, req, thinkingTimeout)
 }

@@ -133,10 +133,10 @@ func (s *BBBreakoutStrategy) Signal(i int) SignalType {
 	}
 	c := s.bars[i].Close
 	prev := s.bars[i-1].Close
-	if prev <= s.bb.Upper[i-1] && c > s.bb.Upper[i] {
+	if prev <= s.bb.Upper[i-1] && c > s.bb.Upper[i-1] {
 		return BuySignal
 	}
-	if prev >= s.bb.Lower[i-1] && c < s.bb.Lower[i] {
+	if prev >= s.bb.Lower[i-1] && c < s.bb.Lower[i-1] {
 		return SellSignal
 	}
 	return NoSignal

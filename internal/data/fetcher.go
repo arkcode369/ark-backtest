@@ -1,6 +1,7 @@
 package data
 
 import (
+	"context"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -8,8 +9,27 @@ import (
 	"net/http"
 	"sort"
 	"strconv"
+	"sync"
 	"time"
 )
+
+var httpClient = &http.Client{Timeout: 30 * time.Second}
+
+var (
+	rateMu    sync.Mutex
+	lastFetch time.Time
+	minDelay  = 200 * time.Millisecond // max ~5 requests/second
+)
+
+func rateLimit() {
+	rateMu.Lock()
+	defer rateMu.Unlock()
+	elapsed := time.Since(lastFetch)
+	if elapsed < minDelay {
+		time.Sleep(minDelay - elapsed)
+	}
+	lastFetch = time.Now()
+}
 
 // OHLCV is a single candlestick bar
 type OHLCV struct {
@@ -69,7 +89,8 @@ func toFloat(v interface{}) (float64, bool) {
 }
 
 // FetchOHLCV downloads OHLCV data from Yahoo Finance
-func FetchOHLCV(params FetchParams) ([]OHLCV, error) {
+func FetchOHLCV(ctx context.Context, params FetchParams) ([]OHLCV, error) {
+	rateLimit()
 	sym, ok := GetSymbol(params.Symbol)
 	if !ok {
 		return nil, fmt.Errorf("unknown symbol: %s", params.Symbol)
@@ -95,28 +116,40 @@ func FetchOHLCV(params FetchParams) ([]OHLCV, error) {
 		)
 	}
 
-	req, err := http.NewRequest("GET", urlStr, nil)
+	req, err := http.NewRequestWithContext(ctx, "GET", urlStr, nil)
 	if err != nil {
 		return nil, err
 	}
 	req.Header.Set("User-Agent", "Mozilla/5.0")
 	req.Header.Set("Accept", "application/json")
 
-	client := &http.Client{Timeout: 30 * time.Second}
-	resp, err := client.Do(req)
+	resp, err := httpClient.Do(req)
 	if err != nil {
 		return nil, fmt.Errorf("HTTP error: %w", err)
 	}
 	defer resp.Body.Close()
 
+	if resp.StatusCode != http.StatusOK {
+		body, _ := io.ReadAll(resp.Body)
+		preview := string(body)
+		if len(preview) > 200 {
+			preview = preview[:200]
+		}
+		return nil, fmt.Errorf("HTTP %d for %s: %s", resp.StatusCode, sym.Ticker, preview)
+	}
+
 	body, err := io.ReadAll(resp.Body)
 	if err != nil {
-		return nil, err
+		return nil, fmt.Errorf("read body: %w", err)
 	}
 
 	var yResp yahooResponse
 	if err := json.Unmarshal(body, &yResp); err != nil {
 		return nil, fmt.Errorf("JSON parse error: %w", err)
+	}
+
+	if yResp.Chart.Error != nil {
+		return nil, fmt.Errorf("Yahoo Finance error for %s: %v", params.Symbol, yResp.Chart.Error)
 	}
 
 	if len(yResp.Chart.Result) == 0 {
@@ -170,7 +203,8 @@ func safeGet(s []interface{}, i int) interface{} {
 }
 
 // FetchLatestPrice returns the latest close price for a symbol
-func FetchLatestPrice(symbolKey string) (float64, string, error) {
+func FetchLatestPrice(ctx context.Context, symbolKey string) (float64, string, error) {
+	rateLimit()
 	sym, ok := GetSymbol(symbolKey)
 	if !ok {
 		return 0, "", fmt.Errorf("unknown symbol: %s", symbolKey)
@@ -179,22 +213,43 @@ func FetchLatestPrice(symbolKey string) (float64, string, error) {
 		"https://query1.finance.yahoo.com/v8/finance/chart/%s?interval=1d&range=2d",
 		sym.Ticker,
 	)
-	req, _ := http.NewRequest("GET", urlStr, nil)
+	req, err := http.NewRequestWithContext(ctx, "GET", urlStr, nil)
+	if err != nil {
+		return 0, "", fmt.Errorf("build request error: %w", err)
+	}
 	req.Header.Set("User-Agent", "Mozilla/5.0")
+	req.Header.Set("Accept", "application/json")
 
-	client := &http.Client{Timeout: 15 * time.Second}
-	resp, err := client.Do(req)
+	resp, err := httpClient.Do(req)
 	if err != nil {
 		return 0, "", err
 	}
 	defer resp.Body.Close()
 
-	body, _ := io.ReadAll(resp.Body)
+	if resp.StatusCode != http.StatusOK {
+		body, _ := io.ReadAll(resp.Body)
+		preview := string(body)
+		if len(preview) > 200 {
+			preview = preview[:200]
+		}
+		return 0, "", fmt.Errorf("HTTP %d for %s: %s", resp.StatusCode, sym.Ticker, preview)
+	}
+
+	body, err := io.ReadAll(resp.Body)
+	if err != nil {
+		return 0, "", fmt.Errorf("read body error: %w", err)
+	}
 	var yResp yahooResponse
-	json.Unmarshal(body, &yResp)
+	if err := json.Unmarshal(body, &yResp); err != nil {
+		return 0, "", fmt.Errorf("JSON parse error: %w", err)
+	}
+
+	if yResp.Chart.Error != nil {
+		return 0, "", fmt.Errorf("Yahoo Finance error for %s: %v", symbolKey, yResp.Chart.Error)
+	}
 
 	if len(yResp.Chart.Result) == 0 {
-		return 0, "", fmt.Errorf("no data")
+		return 0, "", fmt.Errorf("no data for %s (ticker: %s)", symbolKey, sym.Ticker)
 	}
 	price := yResp.Chart.Result[0].Meta.RegPrice
 	currency := yResp.Chart.Result[0].Meta.Currency

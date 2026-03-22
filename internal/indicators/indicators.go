@@ -9,14 +9,18 @@ import (
 
 func SMA(closes []float64, period int) []float64 {
 	result := make([]float64, len(closes))
+	if len(closes) == 0 || period <= 0 {
+		return result
+	}
+	sum := 0.0
 	for i := range closes {
+		sum += closes[i]
 		if i < period-1 {
 			result[i] = math.NaN()
 			continue
 		}
-		sum := 0.0
-		for j := i - period + 1; j <= i; j++ {
-			sum += closes[j]
+		if i >= period {
+			sum -= closes[i-period]
 		}
 		result[i] = sum / float64(period)
 	}
@@ -137,11 +141,7 @@ func BollingerBands(closes []float64, period int, stdDev float64) BBResult {
 			lower[i] = math.NaN()
 			continue
 		}
-		sum := 0.0
-		for j := i - period + 1; j <= i; j++ {
-			sum += closes[j]
-		}
-		mean := sum / float64(period)
+		mean := middle[i]
 		variance := 0.0
 		for j := i - period + 1; j <= i; j++ {
 			diff := closes[j] - mean
@@ -217,7 +217,19 @@ func Stochastic(bars []data.OHLCV, kPeriod, dPeriod int) StochResult {
 			k[i] = (bars[i].Close-lowest)/(highest-lowest)*100
 		}
 	}
-	d := SMA(replaceNaN(k), dPeriod)
+	d := make([]float64, len(bars))
+	// Compute %D as SMA of valid %K values only
+	for i := range bars {
+		if i < kPeriod-1+dPeriod-1 {
+			d[i] = math.NaN()
+			continue
+		}
+		sum := 0.0
+		for j := i - dPeriod + 1; j <= i; j++ {
+			sum += k[j]
+		}
+		d[i] = sum / float64(dPeriod)
+	}
 	return StochResult{K: k, D: d}
 }
 
@@ -233,6 +245,8 @@ func VWAP(bars []data.OHLCV) []float64 {
 		cumVol += b.Volume
 		if cumVol > 0 {
 			result[i] = cumTPV / cumVol
+		} else {
+			result[i] = math.NaN()
 		}
 	}
 	return result
@@ -295,21 +309,23 @@ func Supertrend(bars []data.OHLCV, period int, multiplier float64) SupertrendRes
 		lowerBand[i] = hl2 - multiplier*atr[i]
 	}
 
+	// Initialize first bar
+	supertrend[0] = math.NaN()
+	direction[0] = 1 // default bullish until proven otherwise
+
 	for i := 1; i < n; i++ {
 		if math.IsNaN(atr[i]) {
 			supertrend[i] = math.NaN()
 			continue
 		}
 		// Adjust bands
-		if lowerBand[i] < lowerBand[i-1] || bars[i-1].Close < lowerBand[i-1] {
-			lowerBand[i] = lowerBand[i]
-		} else {
-			lowerBand[i] = lowerBand[i-1]
+		// Lower band ratchets UP during uptrends
+		if bars[i-1].Close > lowerBand[i-1] {
+			lowerBand[i] = math.Max(lowerBand[i], lowerBand[i-1])
 		}
-		if upperBand[i] > upperBand[i-1] || bars[i-1].Close > upperBand[i-1] {
-			upperBand[i] = upperBand[i]
-		} else {
-			upperBand[i] = upperBand[i-1]
+		// Upper band ratchets DOWN during downtrends
+		if bars[i-1].Close < upperBand[i-1] {
+			upperBand[i] = math.Min(upperBand[i], upperBand[i-1])
 		}
 
 		if bars[i].Close > upperBand[i-1] {

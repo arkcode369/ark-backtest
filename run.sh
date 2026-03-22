@@ -1,14 +1,14 @@
 #!/bin/bash
 # Trading Backtest Bot - Run Script
 
-export PATH=$PATH:/home/computer/.local/go/bin
+export PATH=$PATH:$HOME/.local/go/bin
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 cd "$SCRIPT_DIR"
 
 if [ -z "$TELEGRAM_TOKEN" ]; then
   if [ -f .env ]; then
-    export $(cat .env | grep -v '#' | xargs)
+    set -a; source .env; set +a
   fi
 fi
 

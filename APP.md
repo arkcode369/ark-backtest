@@ -67,45 +67,73 @@
 
 - **Language**: Go 1.22
 - **Telegram**: go-telegram-bot-api/v5
-- **Data**: Yahoo Finance v8 API (direct HTTP)
-- **AI**: marketriskmonitor.com/api/analyze (Claude claude-opus-4-6 + extended thinking)
+- **Data**: Yahoo Finance v8 API (direct HTTP, rate-limited to ~5 req/s)
+- **AI**: Configurable endpoint (default: marketriskmonitor.com/api/analyze, Claude claude-opus-4-6 + extended thinking)
+- **Logging**: `log/slog` structured logging (handlers), standard `log` (main entry point)
+
+## Architecture
+
+- **Context propagation**: All HTTP and AI calls accept `context.Context` for cancellation and timeouts
+- **Rate limiting**: Mutex-based rate limiter (200ms min delay) for Yahoo Finance API
+- **Connection pooling**: Shared `http.Client` instances for data fetcher and AI client
+- **Concurrency control**: Semaphore pattern (capacity 20) for Telegram message handlers
+- **Session management**: TTL-based cleanup (30min interval, 1hr idle) for AI chat sessions
+- **Graceful shutdown**: SIGINT/SIGTERM signal handling in main
 
 ## Project Structure
 
 ```
 trading-backtest-bot/
 ├── cmd/
-│   ├── main.go          # entry point
-│   └── test/main.go     # integration tests
+│   ├── main.go              # entry point with graceful shutdown
+│   └── test/main.go         # integration tests
 ├── internal/
 │   ├── data/
-│   │   ├── symbols.go   # symbol definitions + lookup
-│   │   └── fetcher.go   # Yahoo Finance HTTP client
+│   │   ├── symbols.go       # symbol definitions + case-insensitive lookup
+│   │   └── fetcher.go       # Yahoo Finance HTTP client with rate limiting
 │   ├── indicators/
-│   │   └── indicators.go # SMA/EMA/RSI/MACD/BB/ATR/Stoch/VWAP/Donchian/Supertrend
+│   │   ├── indicators.go    # SMA/EMA/RSI/MACD/BB/ATR/Stoch/VWAP/Donchian/Supertrend
+│   │   └── indicators_test.go # 30 unit tests
 │   ├── backtest/
-│   │   ├── engine.go    # backtesting engine + result computation
-│   │   └── strategies.go # 7 built-in strategies + registry
+│   │   ├── engine.go        # backtesting engine + result computation
+│   │   ├── strategies.go    # 7 built-in strategies + registry
+│   │   └── engine_test.go   # 13 unit tests
 │   ├── ai/
-│   │   └── client.go    # Claude API client (regular + thinking mode)
+│   │   └── client.go        # AI API client (configurable endpoint/model)
 │   ├── strategy/
-│   │   └── creator.go   # AI strategy builder + MD generator
+│   │   └── creator.go       # AI strategy builder + MD generator with session TTL
 │   └── bot/
-│       └── handlers.go  # all Telegram command handlers
-├── bin/
-│   └── trading-backtest-bot  # compiled binary
+│       └── handlers.go      # Telegram command handlers with semaphore concurrency
 ├── .env.example
+├── Dockerfile
+├── docker-compose.yml
 ├── run.sh
 └── go.mod
 ```
+
+## Environment Variables
+
+| Variable | Required | Default | Description |
+|---|---|---|---|
+| `TELEGRAM_TOKEN` | Yes | — | Bot token from @BotFather |
+| `AI_ENDPOINT` | No | `https://marketriskmonitor.com/api/analyze` | AI API endpoint |
+| `AI_MODEL` | No | `claude-opus-4-6` | AI model identifier |
 
 ## How to Run
 
 1. Get bot token from @BotFather on Telegram
 2. `cp .env.example .env && nano .env` (set TELEGRAM_TOKEN)
-3. `./run.sh` or `TELEGRAM_TOKEN=xxx ./bin/trading-backtest-bot`
+3. `./run.sh` or `TELEGRAM_TOKEN=xxx go run cmd/main.go`
+4. Or with Docker: `docker-compose up -d`
+
+## Running Tests
+
+```
+go test ./internal/indicators/... -v
+go test ./internal/backtest/... -v
+```
 
 ## Integrates With
 
-- **External**: Yahoo Finance (free, no API key), marketriskmonitor.com (Claude AI proxy)
+- **External**: Yahoo Finance (free, no API key), AI proxy (configurable via `AI_ENDPOINT`)
 - **Telegram**: via polling (no webhook needed)
