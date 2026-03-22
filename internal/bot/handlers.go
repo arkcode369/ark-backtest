@@ -115,6 +115,9 @@ func (b *Bot) Stop() {
 	case <-time.After(65 * time.Second):
 		slog.Warn("shutdown timeout: some handlers may still be running")
 	}
+
+	// Stop the strategy creator's cleanup goroutine
+	b.stratCreator.Stop()
 }
 
 func (b *Bot) handleMessage(msg *tgbotapi.Message) {
@@ -240,7 +243,7 @@ func (b *Bot) sendHelp(chatID int64) {
 		"  `sl=0.02` — stop loss % (default: disabled)\n" +
 		"  `tp=0.04` — take profit % (default: disabled)\n" +
 		"  `commission=5` — round-trip commission USD (default: 0)\n" +
-		"  `period=1y` — data period (default: 1y)\n" +
+		"  `period=1y` — data period (default: varies by interval)\n" +
 		"  `oos=0.3` — walk-forward out-of-sample fraction (default: disabled)\n\n" +
 		"*Data Limits:*\n" +
 		"  1m: 7d | 5m-30m: 60d | 1h: 2yr | 1d: 10yr+"
@@ -696,7 +699,7 @@ func (b *Bot) sendLong(chatID int64, text string) {
 		chunk := text
 		if len(chunk) > maxLen {
 			cut := strings.LastIndex(text[:maxLen], "\n")
-			if cut < 0 {
+			if cut <= 0 {
 				cut = maxLen
 			}
 			chunk = text[:cut]
@@ -741,26 +744,10 @@ func convertAIResponse(text string) string {
 		}
 
 		// Bold **text** → just remove markers (keep text)
-		for strings.Contains(line, "**") {
-			start := strings.Index(line, "**")
-			end := strings.Index(line[start+2:], "**")
-			if end < 0 {
-				break
-			}
-			inner := line[start+2 : start+2+end]
-			line = line[:start] + inner + line[start+2+end+2:]
-		}
+		line = stripMarkdownMarkers(line, "**")
 
-		// Italic *text* or _text_ → keep text
-		for strings.Contains(line, "*") {
-			start := strings.Index(line, "*")
-			end := strings.Index(line[start+1:], "*")
-			if end < 0 {
-				break
-			}
-			inner := line[start+1 : start+1+end]
-			line = line[:start] + inner + line[start+1+end+1:]
-		}
+		// Italic *text* → keep text
+		line = stripMarkdownMarkers(line, "*")
 
 		// Inline code `text` → keep as-is (readable)
 		// Table rows | col | col | → indent them
@@ -797,6 +784,30 @@ func convertAIResponse(text string) string {
 		result = strings.ReplaceAll(result, "\n\n\n\n", "\n\n\n")
 	}
 	return strings.TrimSpace(result)
+}
+
+// stripMarkdownMarkers removes paired markdown markers (e.g., ** or *) in a single pass.
+// It scans left-to-right, finds open+close pairs, and keeps only the inner text.
+func stripMarkdownMarkers(line, marker string) string {
+	mLen := len(marker)
+	var sb strings.Builder
+	sb.Grow(len(line))
+	i := 0
+	for i < len(line) {
+		if i+mLen <= len(line) && line[i:i+mLen] == marker {
+			// Found opening marker, look for closing
+			end := strings.Index(line[i+mLen:], marker)
+			if end >= 0 {
+				// Write inner text (between markers)
+				sb.WriteString(line[i+mLen : i+mLen+end])
+				i = i + mLen + end + mLen
+				continue
+			}
+		}
+		sb.WriteByte(line[i])
+		i++
+	}
+	return sb.String()
 }
 
 // validateParams checks that strategy-specific parameters are reasonable.
@@ -968,7 +979,11 @@ func (b *Bot) handleCompare(chatID int64, args string) {
 		wg.Add(1)
 		go func(i int, s string) {
 			defer wg.Done()
-			symInfo, _ := data.GetSymbol(s)
+			symInfo, ok := data.GetSymbol(s)
+			if !ok {
+				results[i] = compareResult{Symbol: s, Err: fmt.Errorf("unknown symbol: %s", s)}
+				return
+			}
 			bars, err := data.FetchOHLCV(b.ctx, data.FetchParams{
 				Symbol: s, Interval: interval, Period: period,
 			})

@@ -50,30 +50,43 @@ type Creator struct {
 	client   *ai.Client
 	mu       sync.Mutex
 	sessions map[int64]*sessionEntry // chat_id → session entry with TTL tracking
+	cancel   context.CancelFunc
 }
 
 func NewCreator() *Creator {
+	ctx, cancel := context.WithCancel(context.Background())
 	c := &Creator{
 		client:   ai.NewClient(),
 		sessions: make(map[int64]*sessionEntry),
+		cancel:   cancel,
 	}
-	go c.cleanupLoop()
+	go c.cleanupLoop(ctx)
 	return c
 }
 
+// Stop cancels the cleanup goroutine
+func (c *Creator) Stop() {
+	c.cancel()
+}
+
 // cleanupLoop periodically removes sessions idle for more than sessionMaxIdleTime
-func (c *Creator) cleanupLoop() {
+func (c *Creator) cleanupLoop(ctx context.Context) {
 	ticker := time.NewTicker(sessionCleanupInterval)
 	defer ticker.Stop()
-	for range ticker.C {
-		c.mu.Lock()
-		now := time.Now()
-		for chatID, entry := range c.sessions {
-			if now.Sub(entry.lastUsed) > sessionMaxIdleTime {
-				delete(c.sessions, chatID)
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-ticker.C:
+			c.mu.Lock()
+			now := time.Now()
+			for chatID, entry := range c.sessions {
+				if now.Sub(entry.lastUsed) > sessionMaxIdleTime {
+					delete(c.sessions, chatID)
+				}
 			}
+			c.mu.Unlock()
 		}
-		c.mu.Unlock()
 	}
 }
 

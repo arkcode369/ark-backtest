@@ -1,6 +1,7 @@
 package backtest
 
 import (
+	"strings"
 	"testing"
 )
 
@@ -11,8 +12,7 @@ func TestFormatEquityCurve(t *testing.T) {
 		if chart == "" {
 			t.Error("expected non-empty chart")
 		}
-		// Should contain start and end values
-		if !containsSubstring(chart, "10000") || !containsSubstring(chart, "11000") {
+		if !strings.Contains(chart, "10000") || !strings.Contains(chart, "11000") {
 			t.Error("chart should contain start/end equity values")
 		}
 	})
@@ -39,7 +39,7 @@ func TestFormatEquityCurve(t *testing.T) {
 		if chart == "" {
 			t.Error("expected non-empty chart")
 		}
-		if !containsSubstring(chart, "\u25bc") { // down arrow
+		if !strings.Contains(chart, "\u25bc") { // down arrow
 			t.Error("downtrend chart should contain down arrow")
 		}
 	})
@@ -56,17 +56,4 @@ func TestDownsample(t *testing.T) {
 	if result[0] < 1 || result[0] > 2.5 {
 		t.Errorf("first bucket out of expected range: %f", result[0])
 	}
-}
-
-func containsSubstring(s, sub string) bool {
-	return len(s) >= len(sub) && (s == sub || len(s) > 0 && findSubstring(s, sub))
-}
-
-func findSubstring(s, sub string) bool {
-	for i := 0; i <= len(s)-len(sub); i++ {
-		if s[i:i+len(sub)] == sub {
-			return true
-		}
-	}
-	return false
 }

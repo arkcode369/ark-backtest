@@ -201,3 +201,28 @@ func TestGenerateCombinations(t *testing.T) {
 		}
 	}
 }
+
+func TestStripMarkdownMarkers(t *testing.T) {
+	tests := []struct {
+		name     string
+		input    string
+		marker   string
+		expected string
+	}{
+		{"bold pair", "hello **world** today", "**", "hello world today"},
+		{"multiple bold", "**one** and **two**", "**", "one and two"},
+		{"unclosed bold", "hello **world", "**", "hello **world"},
+		{"italic pair", "hello *world* today", "*", "hello world today"},
+		{"empty input", "", "**", ""},
+		{"no markers", "plain text", "**", "plain text"},
+		{"adjacent markers", "****", "**", ""},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got := stripMarkdownMarkers(tt.input, tt.marker)
+			if got != tt.expected {
+				t.Errorf("stripMarkdownMarkers(%q, %q) = %q, want %q", tt.input, tt.marker, got, tt.expected)
+			}
+		})
+	}
+}

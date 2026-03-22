@@ -215,7 +215,10 @@ func (e *Engine) Run(params map[string]float64) (*Result, error) {
 				}
 				// BUG-15 fix: commission represents round-trip cost, charged once at exit
 				pnl -= e.cfg.Commission
-				pnlPct := pnl / (openPos.EntryPrice * openPos.Quantity) * 100
+				var pnlPct float64
+				if denom := openPos.EntryPrice * openPos.Quantity; denom > 0 {
+					pnlPct = pnl / denom * 100
+				}
 
 				t := Trade{
 					EntryTime:  e.bars[openPos.EntryIndex].Time,
@@ -306,7 +309,10 @@ func (e *Engine) Run(params map[string]float64) (*Result, error) {
 		}
 		// Round-trip commission charged at exit
 		pnl -= e.cfg.Commission
-		pnlPct := pnl / (openPos.EntryPrice * openPos.Quantity) * 100
+		var pnlPct float64
+		if denom := openPos.EntryPrice * openPos.Quantity; denom > 0 {
+			pnlPct = pnl / denom * 100
+		}
 
 		trades = append(trades, Trade{
 			EntryTime:  e.bars[openPos.EntryIndex].Time,
