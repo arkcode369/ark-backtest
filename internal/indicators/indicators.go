@@ -316,6 +316,7 @@ func Supertrend(bars []data.OHLCV, period int, multiplier float64) SupertrendRes
 	for i := 1; i < n; i++ {
 		if math.IsNaN(atr[i]) {
 			supertrend[i] = math.NaN()
+			direction[i] = direction[i-1] // preserve direction through warmup
 			continue
 		}
 		// Adjust bands
