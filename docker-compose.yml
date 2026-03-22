@@ -17,9 +17,9 @@ services:
       # Strategy .md files will be saved here
       - ./storage:/storage
 
-    # Health check — confirm process is alive
+    # Health check — HTTP endpoint
     healthcheck:
-      test: ["CMD-SHELL", "kill -0 1 || exit 1"]
+      test: ["CMD", "wget", "-q", "--spider", "http://localhost:8080/health"]
       interval: 30s
       timeout: 10s
       retries: 3

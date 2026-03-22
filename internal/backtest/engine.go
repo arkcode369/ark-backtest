@@ -514,3 +514,99 @@ func TopTrades(r *Result, n int) (best, worst []Trade) {
 	worst = sorted[len(sorted)-n:]
 	return
 }
+
+// WalkForwardResult holds both in-sample and out-of-sample backtest results
+type WalkForwardResult struct {
+	InSample    *Result
+	OutOfSample *Result
+	SplitIndex  int // bar index where the split occurs
+}
+
+// RunWalkForward splits data into in-sample and out-of-sample portions,
+// runs the strategy on both, and returns both results.
+// oosFraction is the fraction of data reserved for out-of-sample (0.0-0.5).
+func (e *Engine) RunWalkForward(params map[string]float64, oosFraction float64) (*WalkForwardResult, error) {
+	if oosFraction <= 0 || oosFraction > 0.5 {
+		return nil, fmt.Errorf("oos fraction must be between 0 and 0.5 (got %.2f)", oosFraction)
+	}
+	if len(e.bars) < 60 {
+		return nil, fmt.Errorf("need at least 60 bars for walk-forward (got %d)", len(e.bars))
+	}
+	if e.strategy == nil {
+		return nil, fmt.Errorf("no strategy set")
+	}
+
+	splitIdx := int(float64(len(e.bars)) * (1 - oosFraction))
+	if splitIdx < 30 {
+		splitIdx = 30
+	}
+
+	// In-sample
+	isEngine := NewEngine(e.cfg)
+	isEngine.LoadData(e.bars[:splitIdx])
+	isEngine.SetStrategy(e.strategy)
+	isResult, err := isEngine.Run(params)
+	if err != nil {
+		return nil, fmt.Errorf("in-sample error: %w", err)
+	}
+
+	// Out-of-sample
+	oosEngine := NewEngine(e.cfg)
+	oosEngine.LoadData(e.bars[splitIdx:])
+	oosEngine.SetStrategy(e.strategy)
+	oosResult, err := oosEngine.Run(params)
+	if err != nil {
+		return nil, fmt.Errorf("out-of-sample error: %w", err)
+	}
+
+	return &WalkForwardResult{
+		InSample:    isResult,
+		OutOfSample: oosResult,
+		SplitIndex:  splitIdx,
+	}, nil
+}
+
+// FormatWalkForwardResult formats the walk-forward result for display
+func FormatWalkForwardResult(wf *WalkForwardResult) string {
+	is := wf.InSample
+	oos := wf.OutOfSample
+
+	return fmt.Sprintf("\U0001f50d *Walk-Forward Analysis*\n\n"+
+		"*In-Sample (%s):*\n"+
+		"  Trades: %d | WR: %.1f%% | P&L: $%.2f\n"+
+		"  Sharpe: %.2f | PF: %.2f | DD: %.1f%%\n\n"+
+		"*Out-of-Sample (%s):*\n"+
+		"  Trades: %d | WR: %.1f%% | P&L: $%.2f\n"+
+		"  Sharpe: %.2f | PF: %.2f | DD: %.1f%%\n\n"+
+		"*Robustness Check:*\n"+
+		"  Sharpe Decay: %.1f%%\n"+
+		"  Win Rate Decay: %.1f pp\n"+
+		"  PF Decay: %.1f%%",
+		is.Period,
+		is.TotalTrades, is.WinRate, is.TotalPnL,
+		is.SharpeRatio, is.ProfitFactor, is.MaxDrawdownPct,
+		oos.Period,
+		oos.TotalTrades, oos.WinRate, oos.TotalPnL,
+		oos.SharpeRatio, oos.ProfitFactor, oos.MaxDrawdownPct,
+		sharpeDecay(is.SharpeRatio, oos.SharpeRatio),
+		oos.WinRate-is.WinRate,
+		pfDecay(is.ProfitFactor, oos.ProfitFactor),
+	)
+}
+
+func sharpeDecay(is, oos float64) float64 {
+	if is == 0 {
+		return 0
+	}
+	return (oos - is) / math.Abs(is) * 100
+}
+
+func pfDecay(is, oos float64) float64 {
+	if is == 0 || math.IsInf(is, 0) {
+		return 0
+	}
+	if math.IsInf(oos, 0) {
+		return 100
+	}
+	return (oos - is) / is * 100
+}

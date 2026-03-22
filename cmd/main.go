@@ -2,7 +2,8 @@ package main
 
 import (
 	"fmt"
-	"log"
+	"log/slog"
+	"net/http"
 	"os"
 	"os/signal"
 	"syscall"
@@ -17,32 +18,47 @@ func main() {
 
 	token := os.Getenv("TELEGRAM_TOKEN")
 	if token == "" {
-		fmt.Println("❌ TELEGRAM_TOKEN environment variable not set")
+		fmt.Println("TELEGRAM_TOKEN environment variable not set")
 		fmt.Println("Set it with: export TELEGRAM_TOKEN=your_bot_token")
 		fmt.Println("Or create a .env file with: TELEGRAM_TOKEN=your_bot_token")
 		os.Exit(1)
 	}
 
-	log.Println("🚀 Starting Trading Backtest Bot...")
+	slog.Info("starting Trading Backtest Bot")
 
 	b, err := bot.New(token)
 	if err != nil {
-		log.Fatalf("❌ Failed to create bot: %v", err)
+		slog.Error("failed to create bot", "error", err)
+		os.Exit(1)
 	}
 
-	// TODO: Replace log with structured logging (e.g., slog or zerolog) for production use.
+	// Health check HTTP endpoint for Docker/monitoring
+	go func() {
+		mux := http.NewServeMux()
+		mux.HandleFunc("/health", func(w http.ResponseWriter, r *http.Request) {
+			w.WriteHeader(http.StatusOK)
+			w.Write([]byte("ok"))
+		})
+		port := os.Getenv("HEALTH_PORT")
+		if port == "" {
+			port = "8080"
+		}
+		slog.Info("health endpoint listening", "port", port)
+		if err := http.ListenAndServe(":"+port, mux); err != nil {
+			slog.Warn("health server error", "error", err)
+		}
+	}()
 
 	// Graceful shutdown: listen for SIGINT and SIGTERM
 	sigCh := make(chan os.Signal, 1)
 	signal.Notify(sigCh, syscall.SIGINT, syscall.SIGTERM)
 
-	// Run the bot in a goroutine since b.Run() blocks on the Telegram update channel
-	go func() {
-		b.Run()
-	}()
+	// Run the bot in a goroutine since b.Run() blocks
+	go b.Run()
 
 	// Block until a shutdown signal is received
 	sig := <-sigCh
-	log.Printf("Received signal %v, shutting down gracefully...", sig)
-	os.Exit(0)
+	slog.Info("received shutdown signal", "signal", sig)
+	b.Stop()
+	slog.Info("bot stopped")
 }

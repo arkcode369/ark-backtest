@@ -7,6 +7,7 @@ import (
 	"math"
 	"os"
 	"path/filepath"
+	"sort"
 	"strconv"
 	"strings"
 	"sync"
@@ -25,6 +26,10 @@ type Bot struct {
 	mu            sync.Mutex
 	stratSessions map[int64]bool // chats in strategy creation mode (mutex-protected)
 	sem           chan struct{}   // semaphore to limit concurrent goroutines
+	wg            sync.WaitGroup // tracks in-flight handler goroutines
+	ctx           context.Context
+	cancel        context.CancelFunc
+	userLimiter   *UserRateLimiter // per-user rate limiting
 }
 
 func New(token string) (*Bot, error) {
@@ -32,11 +37,15 @@ func New(token string) (*Bot, error) {
 	if err != nil {
 		return nil, fmt.Errorf("failed to init bot: %w", err)
 	}
+	ctx, cancel := context.WithCancel(context.Background())
 	return &Bot{
 		api:           api,
 		stratCreator:  strategy.NewCreator(),
 		stratSessions: make(map[int64]bool),
 		sem:           make(chan struct{}, 20),
+		ctx:           ctx,
+		cancel:        cancel,
+		userLimiter:   NewUserRateLimiter(),
 	}, nil
 }
 
@@ -61,17 +70,50 @@ func (b *Bot) Run() {
 	u.Timeout = 60
 	updates := b.api.GetUpdatesChan(u)
 
-	fmt.Printf("🤖 Bot @%s is running...\n", b.api.Self.UserName)
+	slog.Info("bot started", "username", b.api.Self.UserName)
 
-	for update := range updates {
-		if update.Message == nil {
-			continue
+	for {
+		select {
+		case <-b.ctx.Done():
+			slog.Info("bot context cancelled, stopping update loop")
+			return
+		case update, ok := <-updates:
+			if !ok {
+				slog.Info("update channel closed")
+				return
+			}
+			if update.Message == nil {
+				continue
+			}
+			b.wg.Add(1)
+			go func() {
+				defer b.wg.Done()
+				b.sem <- struct{}{}
+				defer func() { <-b.sem }()
+				b.handleMessage(update.Message)
+			}()
 		}
-		go func() {
-			b.sem <- struct{}{}
-			defer func() { <-b.sem }()
-			b.handleMessage(update.Message)
-		}()
+	}
+}
+
+// Stop gracefully stops the bot: stops receiving updates and waits for in-flight handlers
+func (b *Bot) Stop() {
+	slog.Info("stopping bot...")
+	b.cancel()
+	b.api.StopReceivingUpdates()
+
+	// Wait for in-flight handlers with timeout
+	done := make(chan struct{})
+	go func() {
+		b.wg.Wait()
+		close(done)
+	}()
+
+	select {
+	case <-done:
+		slog.Info("all handlers finished")
+	case <-time.After(65 * time.Second):
+		slog.Warn("shutdown timeout: some handlers may still be running")
 	}
 }
 
@@ -97,24 +139,58 @@ func (b *Bot) handleMessage(msg *tgbotapi.Message) {
 	case "symbols":
 		b.handleSymbols(chatID, args)
 	case "price":
+		if !b.userLimiter.Allow(chatID, "price") {
+			b.send(chatID, "\u23f3 Please wait a moment before requesting another price.")
+			return
+		}
 		b.handlePrice(chatID, args)
 	case "backtest":
+		if !b.userLimiter.Allow(chatID, "backtest") {
+			b.send(chatID, "\u23f3 Please wait — your previous backtest may still be running.")
+			return
+		}
 		b.handleBacktest(chatID, args)
+	case "compare":
+		if !b.userLimiter.Allow(chatID, "backtest") {
+			b.send(chatID, "\u23f3 Please wait — your previous comparison may still be running.")
+			return
+		}
+		b.handleCompare(chatID, args)
+	case "optimize":
+		if !b.userLimiter.Allow(chatID, "backtest") {
+			b.send(chatID, "\u23f3 Please wait — your previous optimization may still be running.")
+			return
+		}
+		b.handleOptimize(chatID, args)
 	case "strategy":
+		if !b.userLimiter.Allow(chatID, "ai") {
+			b.send(chatID, "\u23f3 Please wait before starting a new strategy session.")
+			return
+		}
 		b.handleStrategyMode(chatID, args)
 	case "endstrategy":
 		b.handleEndStrategy(chatID)
 	case "genmd":
+		if !b.userLimiter.Allow(chatID, "ai") {
+			b.send(chatID, "\u23f3 Please wait — document generation is in progress.")
+			return
+		}
 		b.handleGenMD(chatID, args)
 	case "analyze":
+		if !b.userLimiter.Allow(chatID, "ai") {
+			b.send(chatID, "\u23f3 Please wait before sending another analysis request.")
+			return
+		}
 		b.handleAnalyze(chatID, args)
 	case "intervals":
 		b.handleIntervals(chatID)
 	case "strategies":
 		b.handleListStrategies(chatID)
+	case "list":
+		b.handleListFiles(chatID)
 	default:
 		if cmd != "" {
-			b.send(chatID, "❓ Unknown command: /"+cmd+"\nUse /help for all available commands.")
+			b.send(chatID, "\u2753 Unknown command: /"+cmd+"\nUse /help for all available commands.")
 		}
 	}
 }
@@ -145,21 +221,27 @@ func (b *Bot) sendHelp(chatID int64) {
 		"`/backtest SYMBOL INTERVAL STRATEGY [params]`\n" +
 		"  _Example:_ `/backtest XAUUSD 1d ema_cross fast=9 slow=21`\n" +
 		"  _Example:_ `/backtest NQ 1h macd fast=12 slow=26 signal=9`\n" +
-		"  _Example:_ `/backtest EURUSD 1h rsi period=14`\n\n" +
+		"  _Example:_ `/backtest EURUSD 1h rsi period=14`\n" +
+		"`/compare SYM1,SYM2,SYM3 INTERVAL STRATEGY [params]`\n" +
+		"  _Compare strategy across multiple symbols_\n" +
+		"`/optimize SYMBOL INTERVAL STRATEGY param=min:max:step`\n" +
+		"  _Example:_ `/optimize XAUUSD 1d ema_cross fast=5:20:1 slow=15:50:5`\n\n" +
 		"*🧠 Strategy Builder (AI)*\n" +
 		"`/strategy [topic]` — start AI strategy conversation\n" +
 		"`/endstrategy` — end session\n" +
 		"`/genmd [name]` — generate strategy document (.md file)\n" +
 		"`/analyze [question]` — quick AI market analysis\n\n" +
 		"*📋 Info*\n" +
-		"`/strategies` — list built-in strategies\n\n" +
+		"`/strategies` — list built-in strategies\n" +
+		"`/list` — list saved strategy documents\n\n" +
 		"*⚙️ Backtest Options (add to command)*\n" +
 		"  `capital=10000` — starting capital (default: 10000)\n" +
 		"  `pos=0.02` — position size % (default: 2%)\n" +
 		"  `sl=0.02` — stop loss % (default: disabled)\n" +
 		"  `tp=0.04` — take profit % (default: disabled)\n" +
 		"  `commission=5` — round-trip commission USD (default: 0)\n" +
-		"  `period=1y` — data period (default: 1y)\n\n" +
+		"  `period=1y` — data period (default: 1y)\n" +
+		"  `oos=0.3` — walk-forward out-of-sample fraction (default: disabled)\n\n" +
 		"*Data Limits:*\n" +
 		"  1m: 7d | 5m-30m: 60d | 1h: 2yr | 1d: 10yr+"
 
@@ -229,8 +311,7 @@ func (b *Bot) handlePrice(chatID int64, args string) {
 
 	b.send(chatID, "⏳ Fetching price...")
 
-	ctx := context.Background()
-	price, currency, err := data.FetchLatestPrice(ctx, sym)
+	price, currency, err := data.FetchLatestPrice(b.ctx, sym)
 	if err != nil {
 		b.send(chatID, fmt.Sprintf("❌ Error fetching price for %s: %v", sym, err))
 		return
@@ -315,6 +396,7 @@ func (b *Bot) handleBacktest(chatID int64, args string) {
 	tpPct := getOptFloat(opts, "tp", 0)
 	commission := getOptFloat(opts, "commission", 0)
 	period := getOptStr(opts, "period", defaultPeriod(interval))
+	oosFraction := getOptFloat(opts, "oos", 0) // walk-forward out-of-sample fraction
 
 	// Validate engine config params
 	if capital <= 0 {
@@ -372,8 +454,7 @@ func (b *Bot) handleBacktest(chatID int64, args string) {
 	b.send(chatID, fmt.Sprintf("⏳ Fetching %s data (%s, %s)...", symbolKey, interval, period))
 
 	// Fetch data
-	ctx := context.Background()
-	bars, err := data.FetchOHLCV(ctx, data.FetchParams{
+	bars, err := data.FetchOHLCV(b.ctx, data.FetchParams{
 		Symbol:   symbolKey,
 		Interval: interval,
 		Period:   period,
@@ -420,6 +501,14 @@ func (b *Bot) handleBacktest(chatID int64, args string) {
 	// Send result
 	b.sendMD(chatID, backtest.FormatResult(result, capital))
 
+	// Send equity curve chart
+	if len(result.EquityCurve) > 2 {
+		chart := backtest.FormatEquityCurve(result.EquityCurve, 50, 12)
+		if chart != "" {
+			b.send(chatID, chart)
+		}
+	}
+
 	// Send top trades if any
 	if len(result.Trades) > 0 {
 		n := 3
@@ -449,6 +538,22 @@ func (b *Bot) handleBacktest(chatID int64, args string) {
 		// Tip for next steps
 		b.send(chatID, "💡 Tip: Use /analyze to ask AI about these results, or /strategy to build a custom strategy.")
 	}
+
+	// Walk-forward validation if requested
+	if oosFraction > 0 {
+		if oosFraction > 0.5 {
+			oosFraction = 0.3
+		}
+		wfEngine := backtest.NewEngine(cfg)
+		wfEngine.LoadData(bars)
+		wfEngine.SetStrategy(meta.Factory())
+		wfResult, err := wfEngine.RunWalkForward(params, oosFraction)
+		if err != nil {
+			b.send(chatID, fmt.Sprintf("Walk-forward error: %v", err))
+		} else {
+			b.sendMD(chatID, backtest.FormatWalkForwardResult(wfResult))
+		}
+	}
 }
 
 // ── /strategy ─────────────────────────────────────────────────────────────
@@ -477,8 +582,7 @@ func (b *Bot) handleStrategyMode(chatID int64, args string) {
 func (b *Bot) handleStrategyChat(chatID int64, text string) {
 	b.send(chatID, "🤔 Thinking...")
 
-	ctx := context.Background()
-	response, err := b.stratCreator.Chat(ctx, chatID, text)
+	response, err := b.stratCreator.Chat(b.ctx, chatID, text)
 	if err != nil {
 		b.send(chatID, fmt.Sprintf("❌ AI error: %v", err))
 		return
@@ -502,8 +606,7 @@ func (b *Bot) handleGenMD(chatID int64, args string) {
 
 	b.send(chatID, "📝 Generating strategy document with extended thinking... (this may take 30-60s)")
 
-	ctx := context.Background()
-	md, err := b.stratCreator.GenerateStrategyMD(ctx, chatID, stratName)
+	md, err := b.stratCreator.GenerateStrategyMD(b.ctx, chatID, stratName)
 	if err != nil {
 		b.send(chatID, fmt.Sprintf("❌ Error generating document: %v", err))
 		return
@@ -553,8 +656,7 @@ func (b *Bot) handleAnalyze(chatID int64, args string) {
 
 	b.send(chatID, "🔍 Analyzing...")
 
-	ctx := context.Background()
-	response, err := b.stratCreator.QuickAnalysis(ctx, args)
+	response, err := b.stratCreator.QuickAnalysis(b.ctx, args)
 	if err != nil {
 		b.send(chatID, fmt.Sprintf("❌ AI error: %v", err))
 		return
@@ -795,4 +897,353 @@ func sanitizeFilename(s string) string {
 		}
 	}
 	return out.String()
+}
+
+// ── /compare ─────────────────────────────────────────────────────────────
+
+func (b *Bot) handleCompare(chatID int64, args string) {
+	if args == "" {
+		b.send(chatID, "Usage: /compare SYM1,SYM2,SYM3 INTERVAL STRATEGY [params]\nExample: /compare XAUUSD,XAGUSD,CL 1d ema_cross fast=9 slow=21")
+		return
+	}
+
+	parts := strings.Fields(args)
+	if len(parts) < 3 {
+		b.send(chatID, "Need at least: SYMBOLS INTERVAL STRATEGY\nExample: /compare XAUUSD,XAGUSD 1d ema_cross")
+		return
+	}
+
+	symbols := strings.Split(strings.ToUpper(parts[0]), ",")
+	if len(symbols) < 2 || len(symbols) > 10 {
+		b.send(chatID, "Provide 2-10 symbols separated by commas.")
+		return
+	}
+
+	interval := strings.ToLower(parts[1])
+	stratKey := strings.ToLower(parts[2])
+
+	opts := parseOptions(parts[3:])
+	period := getOptStr(opts, "period", defaultPeriod(interval))
+	capital := getOptFloat(opts, "capital", 10000)
+	posSizePct := getOptFloat(opts, "pos", 0.02)
+
+	meta, ok := backtest.StrategyRegistry[stratKey]
+	if !ok {
+		b.send(chatID, fmt.Sprintf("Unknown strategy: %s\nUse /strategies to see all.", stratKey))
+		return
+	}
+
+	if _, ok := data.ValidIntervals[interval]; !ok {
+		b.send(chatID, fmt.Sprintf("Unsupported interval: %s", interval))
+		return
+	}
+
+	// Validate all symbols first
+	for _, sym := range symbols {
+		if _, ok := data.GetSymbol(sym); !ok {
+			b.send(chatID, fmt.Sprintf("Unknown symbol: %s", sym))
+			return
+		}
+	}
+
+	b.send(chatID, fmt.Sprintf("Comparing %s with %s strategy across %d symbols...", stratKey, interval, len(symbols)))
+
+	// Merge params
+	stratParams := extractStratParams(opts, stratKey)
+	params := copyParams(meta.Params)
+	for k, v := range stratParams {
+		params[k] = v
+	}
+
+	// Run backtests concurrently
+	type compareResult struct {
+		Symbol string
+		Result *backtest.Result
+		Err    error
+	}
+	results := make([]compareResult, len(symbols))
+	var wg sync.WaitGroup
+
+	for idx, sym := range symbols {
+		wg.Add(1)
+		go func(i int, s string) {
+			defer wg.Done()
+			symInfo, _ := data.GetSymbol(s)
+			bars, err := data.FetchOHLCV(b.ctx, data.FetchParams{
+				Symbol: s, Interval: interval, Period: period,
+			})
+			if err != nil {
+				results[i] = compareResult{Symbol: s, Err: err}
+				return
+			}
+			if len(bars) < 30 {
+				results[i] = compareResult{Symbol: s, Err: fmt.Errorf("only %d bars", len(bars))}
+				return
+			}
+			cfg := backtest.Config{
+				InitialCapital:  capital,
+				PositionSizePct: posSizePct,
+				Slippage:        symInfo.TickSize,
+				Symbol:          s,
+				Interval:        interval,
+			}
+			engine := backtest.NewEngine(cfg)
+			engine.LoadData(bars)
+			engine.SetStrategy(meta.Factory())
+			r, err := engine.Run(params)
+			results[i] = compareResult{Symbol: s, Result: r, Err: err}
+		}(idx, sym)
+	}
+	wg.Wait()
+
+	// Format comparison table
+	var sb strings.Builder
+	sb.WriteString(fmt.Sprintf("\U0001f4ca *%s Comparison — %s %s*\n\n", meta.Name, interval, period))
+	sb.WriteString(fmt.Sprintf("%-10s | %5s | %6s | %9s | %6s | %5s\n", "Symbol", "Trades", "WinRate", "P&L", "MaxDD%", "Sharpe"))
+	sb.WriteString(strings.Repeat("\u2500", 58) + "\n")
+
+	for _, r := range results {
+		if r.Err != nil {
+			sb.WriteString(fmt.Sprintf("%-10s | ERROR: %v\n", r.Symbol, r.Err))
+			continue
+		}
+		res := r.Result
+		sb.WriteString(fmt.Sprintf("%-10s | %5d | %5.1f%% | $%8.2f | %5.1f%% | %5.2f\n",
+			r.Symbol, res.TotalTrades, res.WinRate, res.TotalPnL, res.MaxDrawdownPct, res.SharpeRatio))
+	}
+
+	b.send(chatID, sb.String())
+}
+
+// ── /optimize ────────────────────────────────────────────────────────────
+
+func (b *Bot) handleOptimize(chatID int64, args string) {
+	if args == "" {
+		b.send(chatID, "Usage: /optimize SYMBOL INTERVAL STRATEGY param=min:max:step ...\n"+
+			"Example: /optimize XAUUSD 1d ema_cross fast=5:20:1 slow=15:50:5\n\n"+
+			"Parameter ranges: name=min:max:step")
+		return
+	}
+
+	parts := strings.Fields(args)
+	if len(parts) < 4 {
+		b.send(chatID, "Need: SYMBOL INTERVAL STRATEGY param=min:max:step\nAt least one parameter range is required.")
+		return
+	}
+
+	symbolKey := strings.ToUpper(parts[0])
+	interval := strings.ToLower(parts[1])
+	stratKey := strings.ToLower(parts[2])
+
+	symInfo, ok := data.GetSymbol(symbolKey)
+	if !ok {
+		b.send(chatID, fmt.Sprintf("Unknown symbol: %s", symbolKey))
+		return
+	}
+	if _, ok := data.ValidIntervals[interval]; !ok {
+		b.send(chatID, fmt.Sprintf("Unsupported interval: %s", interval))
+		return
+	}
+	meta, ok := backtest.StrategyRegistry[stratKey]
+	if !ok {
+		b.send(chatID, fmt.Sprintf("Unknown strategy: %s", stratKey))
+		return
+	}
+
+	// Parse parameter ranges (param=min:max:step)
+	ranges := make(map[string][3]float64) // name -> [min, max, step]
+	opts := parseOptions(parts[3:])
+	period := getOptStr(opts, "period", defaultPeriod(interval))
+	capital := getOptFloat(opts, "capital", 10000)
+
+	for _, p := range parts[3:] {
+		kv := strings.SplitN(p, "=", 2)
+		if len(kv) != 2 {
+			continue
+		}
+		key := strings.ToLower(kv[0])
+		// Skip non-range options
+		if key == "period" || key == "capital" || key == "pos" || key == "sl" || key == "tp" || key == "commission" {
+			continue
+		}
+		rangeStr := strings.Split(kv[1], ":")
+		if len(rangeStr) != 3 {
+			continue
+		}
+		min, err1 := strconv.ParseFloat(rangeStr[0], 64)
+		max, err2 := strconv.ParseFloat(rangeStr[1], 64)
+		step, err3 := strconv.ParseFloat(rangeStr[2], 64)
+		if err1 != nil || err2 != nil || err3 != nil || step <= 0 || min > max {
+			b.send(chatID, fmt.Sprintf("Invalid range for %s: %s (use min:max:step)", key, kv[1]))
+			return
+		}
+		ranges[key] = [3]float64{min, max, step}
+	}
+
+	if len(ranges) == 0 {
+		b.send(chatID, "No parameter ranges found. Use format: param=min:max:step")
+		return
+	}
+
+	// Generate parameter combinations
+	combos := generateCombinations(ranges, meta.Params)
+	if len(combos) > 500 {
+		b.send(chatID, fmt.Sprintf("Too many combinations (%d). Reduce ranges or increase step. Max: 500.", len(combos)))
+		return
+	}
+
+	b.send(chatID, fmt.Sprintf("Optimizing %s on %s %s: %d combinations...", stratKey, symbolKey, interval, len(combos)))
+
+	// Fetch data once
+	bars, err := data.FetchOHLCV(b.ctx, data.FetchParams{
+		Symbol: symbolKey, Interval: interval, Period: period,
+	})
+	if err != nil {
+		b.send(chatID, fmt.Sprintf("Data fetch error: %v", err))
+		return
+	}
+	if len(bars) < 30 {
+		b.send(chatID, fmt.Sprintf("Not enough data: %d bars.", len(bars)))
+		return
+	}
+
+	// Run all combinations
+	type optResult struct {
+		Params map[string]float64
+		Result *backtest.Result
+	}
+	var results []optResult
+
+	for _, params := range combos {
+		cfg := backtest.Config{
+			InitialCapital:  capital,
+			PositionSizePct: 0.02,
+			Slippage:        symInfo.TickSize,
+			Symbol:          symbolKey,
+			Interval:        interval,
+		}
+		engine := backtest.NewEngine(cfg)
+		engine.LoadData(bars)
+		engine.SetStrategy(meta.Factory())
+		r, err := engine.Run(params)
+		if err != nil {
+			continue
+		}
+		if r.TotalTrades < 5 {
+			continue // skip params that produce too few trades
+		}
+		results = append(results, optResult{Params: params, Result: r})
+	}
+
+	if len(results) == 0 {
+		b.send(chatID, "No valid results. All parameter combinations produced < 5 trades.")
+		return
+	}
+
+	// Sort by Sharpe ratio (descending)
+	sort.Slice(results, func(i, j int) bool {
+		return results[i].Result.SharpeRatio > results[j].Result.SharpeRatio
+	})
+
+	// Show top 5
+	n := 5
+	if len(results) < n {
+		n = len(results)
+	}
+
+	var sb strings.Builder
+	sb.WriteString(fmt.Sprintf("\U0001f3af *Optimization Results — %s %s %s*\n", symbolKey, interval, meta.Name))
+	sb.WriteString(fmt.Sprintf("Tested: %d combinations | Bars: %d\n\n", len(combos), len(bars)))
+
+	for i := 0; i < n; i++ {
+		r := results[i]
+		sb.WriteString(fmt.Sprintf("#%d ", i+1))
+		var pStrs []string
+		for k, v := range r.Params {
+			pStrs = append(pStrs, fmt.Sprintf("%s=%.0f", k, v))
+		}
+		sb.WriteString(strings.Join(pStrs, " "))
+		sb.WriteString(fmt.Sprintf("\n   Trades=%d WR=%.0f%% P&L=$%.0f Sharpe=%.2f PF=%.2f DD=%.1f%%\n\n",
+			r.Result.TotalTrades, r.Result.WinRate, r.Result.TotalPnL,
+			r.Result.SharpeRatio, r.Result.ProfitFactor, r.Result.MaxDrawdownPct))
+	}
+
+	sb.WriteString("Use the best params with /backtest to see full results.")
+	b.send(chatID, sb.String())
+}
+
+// generateCombinations creates all parameter combinations from ranges
+func generateCombinations(ranges map[string][3]float64, defaults map[string]float64) []map[string]float64 {
+	// Build list of param names and their values
+	type paramValues struct {
+		name   string
+		values []float64
+	}
+	var pv []paramValues
+	for name, r := range ranges {
+		var vals []float64
+		for v := r[0]; v <= r[1]; v += r[2] {
+			vals = append(vals, v)
+		}
+		pv = append(pv, paramValues{name: name, values: vals})
+	}
+
+	// Cartesian product
+	var result []map[string]float64
+	var generate func(idx int, current map[string]float64)
+	generate = func(idx int, current map[string]float64) {
+		if idx == len(pv) {
+			combo := copyParams(defaults)
+			for k, v := range current {
+				combo[k] = v
+			}
+			result = append(result, combo)
+			return
+		}
+		for _, v := range pv[idx].values {
+			current[pv[idx].name] = v
+			generate(idx+1, current)
+		}
+	}
+	generate(0, make(map[string]float64))
+	return result
+}
+
+// ── /list ─────────────────────────────────────────────────────────────────
+
+func (b *Bot) handleListFiles(chatID int64) {
+	storageDir := os.Getenv("STORAGE_DIR")
+	if storageDir == "" {
+		storageDir = "/storage"
+	}
+
+	entries, err := os.ReadDir(storageDir)
+	if err != nil {
+		b.send(chatID, "No strategy documents found. Use /genmd to generate one.")
+		return
+	}
+
+	var files []string
+	for _, e := range entries {
+		if !e.IsDir() && strings.HasSuffix(e.Name(), ".md") {
+			info, err := e.Info()
+			if err != nil {
+				continue
+			}
+			files = append(files, fmt.Sprintf("  %s (%s)",
+				e.Name(), info.ModTime().Format("2006-01-02 15:04")))
+		}
+	}
+
+	if len(files) == 0 {
+		b.send(chatID, "No strategy documents found. Use /genmd to generate one.")
+		return
+	}
+
+	var sb strings.Builder
+	sb.WriteString(fmt.Sprintf("Saved Strategy Documents (%d):\n\n", len(files)))
+	for _, f := range files {
+		sb.WriteString(f + "\n")
+	}
+	b.send(chatID, sb.String())
 }

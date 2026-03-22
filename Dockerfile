@@ -32,6 +32,8 @@ USER botuser
 
 VOLUME ["/storage"]
 
+EXPOSE 8080
+
 ENV TZ=Asia/Jakarta
 
 ENTRYPOINT ["/bot"]
