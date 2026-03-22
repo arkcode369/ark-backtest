@@ -45,6 +45,7 @@ var SymbolMap = map[string]Symbol{
 }
 
 // ValidIntervals maps user-friendly names to Yahoo Finance interval strings
+// Yahoo Finance does NOT support 4h — closest is 1h or 1d
 var ValidIntervals = map[string]string{
 	"1m":  "1m",
 	"2m":  "2m",
@@ -53,8 +54,10 @@ var ValidIntervals = map[string]string{
 	"30m": "30m",
 	"1h":  "60m",
 	"60m": "60m",
+	"4h":  "60m", // 4h not supported by Yahoo; fallback to 1h with a warning
 	"1d":  "1d",
 	"1w":  "1wk",
+	"1wk": "1wk",
 	"1mo": "1mo",
 }
 

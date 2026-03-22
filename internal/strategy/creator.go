@@ -87,72 +87,52 @@ func (c *Creator) ResetSession(chatID int64) {
 
 // GenerateStrategyMD generates a full strategy document in Markdown
 func (c *Creator) GenerateStrategyMD(chatID int64, strategyName string) (string, error) {
-	prompt := fmt.Sprintf(`Based on our conversation, generate a complete trading strategy document in Markdown format for: "%s"
+	prompt := fmt.Sprintf(`Based on our conversation, generate a complete trading strategy document in Markdown for: "%s"
 
-The document MUST include:
-# Strategy Name
+Include these sections (be concise but complete):
+
+# %s
 
 ## Overview
-- Strategy type (trend-following/mean-reversion/breakout/etc.)
-- Best markets/instruments
-- Best timeframes
-- Market conditions (trending/ranging/volatile)
+Type, best instruments, timeframes, market conditions.
 
 ## Entry Rules
-- Exact entry conditions with indicator values
-- Confirmation filters
-- Session/time filters
+Exact conditions, confirmation filters, session filters.
 
 ## Exit Rules
-- Take profit (fixed/trailing/indicator-based)
-- Stop loss placement
-- Time-based exit
+Take profit, stop loss, time-based exit.
 
-## Position Sizing
-- Recommended risk per trade (% of capital)
-- Leverage guidance
-
-## Risk Management
-- Max daily loss limit
-- Correlation risk
-- News event handling
+## Position Sizing & Risk Management
+Risk per trade, leverage, daily loss limit.
 
 ## Parameters
 | Parameter | Default | Range | Description |
 |---|---|---|---|
-| ... | ... | ... | ... |
 
-## Pseudocode
-` + "```" + `
-// Entry logic pseudocode
-` + "```" + `
+## Entry/Exit Pseudocode
 
 ## Backtest Command
-Provide the exact bot command to backtest this strategy:
 /backtest SYMBOL INTERVAL STRATEGY [params]
 
-## Performance Expectations
-- Expected win rate range
-- Expected profit factor
-- Best performing market conditions
-
-## Limitations & Risks
-- Known weaknesses
-- Market conditions to avoid
-
-## Optimization Notes
-- Which parameters to optimize first
-- Common overfitting traps
+## Performance Expectations & Limitations
 
 ---
-*Generated: %s*`, strategyName, time.Now().Format("2006-01-02 15:04:05"))
+Generated: %s`, strategyName, strategyName, time.Now().Format("2006-01-02 15:04"))
 
-	response, err := c.client.ChatWithThinking(systemPrompt, append(c.sessions[chatID], ai.Message{
-		Role:    "user",
-		Content: prompt,
-	}), 8192, 5000)
+	// Build messages: existing session context + genmd prompt
+	msgs := make([]ai.Message, len(c.sessions[chatID]))
+	copy(msgs, c.sessions[chatID])
+	msgs = append(msgs, ai.Message{Role: "user", Content: prompt})
+
+	// Use thinking with conservative budget (3000) and max_tokens (4096)
+	// to stay well within API timeout limits
+	response, err := c.client.ChatWithThinking(systemPrompt, msgs, 4096, 3000)
 	if err != nil {
-		return "", err
+		// Fallback: try without thinking if it fails
+		response, err = c.client.Chat(systemPrompt, msgs, 4096)
+		if err != nil {
+			return "", fmt.Errorf("strategy generation failed: %w", err)
+		}
 	}
 
 	return response, nil
