@@ -7,6 +7,7 @@ import (
 	"path/filepath"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 	"trading-backtest-bot/internal/backtest"
 	"trading-backtest-bot/internal/data"
@@ -19,7 +20,8 @@ import (
 type Bot struct {
 	api           *tgbotapi.BotAPI
 	stratCreator  *strategy.Creator
-	stratSessions map[int64]bool // chats in strategy creation mode
+	mu            sync.Mutex
+	stratSessions map[int64]bool // chats in strategy creation mode (mutex-protected)
 }
 
 func New(token string) (*Bot, error) {
@@ -32,6 +34,22 @@ func New(token string) (*Bot, error) {
 		stratCreator:  strategy.NewCreator(),
 		stratSessions: make(map[int64]bool),
 	}, nil
+}
+
+func (b *Bot) isStratSession(chatID int64) bool {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	return b.stratSessions[chatID]
+}
+
+func (b *Bot) setStratSession(chatID int64, active bool) {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	if active {
+		b.stratSessions[chatID] = true
+	} else {
+		delete(b.stratSessions, chatID)
+	}
 }
 
 func (b *Bot) Run() {
@@ -54,7 +72,7 @@ func (b *Bot) handleMessage(msg *tgbotapi.Message) {
 	text := strings.TrimSpace(msg.Text)
 
 	// ── Strategy creation mode ────────────────────────────────
-	if b.stratSessions[chatID] && !strings.HasPrefix(text, "/") {
+	if b.isStratSession(chatID) && !strings.HasPrefix(text, "/") {
 		b.handleStrategyChat(chatID, text)
 		return
 	}
@@ -395,7 +413,7 @@ func (b *Bot) handleBacktest(chatID int64, args string) {
 // ── /strategy ─────────────────────────────────────────────────────────────
 
 func (b *Bot) handleStrategyMode(chatID int64, args string) {
-	b.stratSessions[chatID] = true
+	b.setStratSession(chatID, true)
 	b.stratCreator.ResetSession(chatID)
 
 	greeting := "🧠 *AI Strategy Builder Mode Active*\n\n" +
@@ -428,7 +446,7 @@ func (b *Bot) handleStrategyChat(chatID int64, text string) {
 }
 
 func (b *Bot) handleEndStrategy(chatID int64) {
-	delete(b.stratSessions, chatID)
+	b.setStratSession(chatID, false)
 	b.send(chatID, "✅ Strategy session ended. Use /strategy to start a new one.")
 }
 
