@@ -493,7 +493,36 @@ func (b *Bot) handleBacktest(chatID int64, args string) {
 
 	engine := backtest.NewEngine(cfg)
 	engine.LoadData(bars)
-	engine.SetStrategy(meta.Factory())
+	strat := meta.Factory()
+	engine.SetStrategy(strat)
+
+	// Auto-fetch MTF data if strategy needs higher-timeframe context
+	if mtf, ok := strat.(backtest.MultiTimeframeStrategy); ok {
+		tfs := mtf.Timeframes()
+		if len(tfs) > 0 {
+			b.send(chatID, fmt.Sprintf("📈 Fetching higher-timeframe data (%s)...", strings.Join(tfs, ", ")))
+			mtfData, err := data.FetchMultiTF(b.ctx, symbolKey, tfs, period)
+			if err != nil {
+				b.send(chatID, fmt.Sprintf("⚠️ MTF data fetch warning: %v (continuing without HTF bias)", err))
+			} else {
+				engine.LoadMTFData(mtfData)
+			}
+		}
+	}
+
+	// Auto-fetch correlated symbol data if strategy needs it (SMT divergence)
+	if ms, ok := strat.(backtest.MultiSymbolStrategy); ok {
+		syms := ms.Symbols()
+		if len(syms) > 0 {
+			b.send(chatID, fmt.Sprintf("🔗 Fetching correlated symbol data (%s)...", strings.Join(syms, ", ")))
+			symData, err := data.FetchMultiSymbol(b.ctx, syms, interval, period)
+			if err != nil {
+				b.send(chatID, fmt.Sprintf("⚠️ Multi-symbol data fetch warning: %v (continuing without SMT)", err))
+			} else {
+				engine.LoadSymbolData(symData)
+			}
+		}
+	}
 
 	result, err := engine.Run(params)
 	if err != nil {

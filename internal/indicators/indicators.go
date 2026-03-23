@@ -346,6 +346,62 @@ func Supertrend(bars []data.OHLCV, period int, multiplier float64) SupertrendRes
 	return SupertrendResult{Value: supertrend, Direction: direction}
 }
 
+// ── Swing High/Low Detection ─────────────────────────────────────────────
+
+// SwingHighs returns a slice where element i is the bar's high price if
+// bar i is a confirmed swing high (highest high in [i-period, i+period]),
+// or NaN otherwise. A swing at bar i is only confirmable after bar i+period.
+func SwingHighs(bars []data.OHLCV, period int) []float64 {
+	n := len(bars)
+	result := make([]float64, n)
+	for i := range result {
+		result[i] = math.NaN()
+	}
+	for i := period; i < n-period; i++ {
+		isSwing := true
+		for j := i - period; j <= i+period; j++ {
+			if j == i {
+				continue
+			}
+			if bars[j].High >= bars[i].High {
+				isSwing = false
+				break
+			}
+		}
+		if isSwing {
+			result[i] = bars[i].High
+		}
+	}
+	return result
+}
+
+// SwingLows returns a slice where element i is the bar's low price if
+// bar i is a confirmed swing low (lowest low in [i-period, i+period]),
+// or NaN otherwise. A swing at bar i is only confirmable after bar i+period.
+func SwingLows(bars []data.OHLCV, period int) []float64 {
+	n := len(bars)
+	result := make([]float64, n)
+	for i := range result {
+		result[i] = math.NaN()
+	}
+	for i := period; i < n-period; i++ {
+		isSwing := true
+		for j := i - period; j <= i+period; j++ {
+			if j == i {
+				continue
+			}
+			if bars[j].Low <= bars[i].Low {
+				isSwing = false
+				break
+			}
+		}
+		if isSwing {
+			result[i] = bars[i].Low
+		}
+	}
+	return result
+}
+
 // ── Helpers ───────────────────────────────────────────────────────────────
 
 func replaceNaN(s []float64) []float64 {

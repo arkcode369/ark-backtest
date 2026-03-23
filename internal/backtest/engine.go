@@ -60,9 +60,11 @@ type Config struct {
 	Slippage        float64 // in price units
 	StopLossPct     float64 // 0 = disabled
 	TakeProfitPct   float64 // 0 = disabled
-	MaxOpenTrades   int     // reserved for future multi-position support; currently unused
-	Symbol          string
-	Interval        string
+	MaxOpenTrades    int     // reserved for future multi-position support; currently unused
+	Symbol           string
+	Interval         string
+	HTFIntervals     []string // additional higher-timeframe intervals to fetch
+	CorrelatedSymbol string   // symbol for SMT divergence (e.g., "NQ" when primary is "ES")
 }
 
 // ── Result ────────────────────────────────────────────────────────────────
@@ -98,9 +100,11 @@ type Result struct {
 // ── Engine ────────────────────────────────────────────────────────────────
 
 type Engine struct {
-	cfg      Config
-	bars     []data.OHLCV
-	strategy Strategy
+	cfg        Config
+	bars       []data.OHLCV
+	strategy   Strategy
+	mtfBars    map[string][]data.OHLCV // timeframe -> bars (optional)
+	symbolBars map[string][]data.OHLCV // symbol -> bars (optional)
 }
 
 func NewEngine(cfg Config) *Engine {
@@ -109,6 +113,16 @@ func NewEngine(cfg Config) *Engine {
 
 func (e *Engine) LoadData(bars []data.OHLCV) {
 	e.bars = bars
+}
+
+// LoadMTFData provides additional timeframe data for MultiTimeframeStrategy
+func (e *Engine) LoadMTFData(barsByTF map[string][]data.OHLCV) {
+	e.mtfBars = barsByTF
+}
+
+// LoadSymbolData provides correlated symbol data for MultiSymbolStrategy
+func (e *Engine) LoadSymbolData(barsBySymbol map[string][]data.OHLCV) {
+	e.symbolBars = barsBySymbol
 }
 
 func (e *Engine) SetStrategy(s Strategy) {
@@ -125,6 +139,18 @@ func (e *Engine) Run(params map[string]float64) (*Result, error) {
 	}
 
 	e.strategy.Init(e.bars, params)
+
+	// Optional interface hooks for advanced strategies
+	if mtf, ok := e.strategy.(MultiTimeframeStrategy); ok && e.mtfBars != nil {
+		mtf.InitMTF(e.mtfBars, params)
+	}
+	if ms, ok := e.strategy.(MultiSymbolStrategy); ok && e.symbolBars != nil {
+		ms.InitMultiSymbol(e.symbolBars, params)
+	}
+	if sa, ok := e.strategy.(SessionAwareStrategy); ok {
+		sessions := LabelSessions(e.bars)
+		sa.InitSessions(sessions)
+	}
 
 	capital := e.cfg.InitialCapital
 	equityCurve := []float64{capital}

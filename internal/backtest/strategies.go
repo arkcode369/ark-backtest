@@ -1,6 +1,7 @@
 package backtest
 
 import (
+	"math"
 	"trading-backtest-bot/internal/data"
 	"trading-backtest-bot/internal/indicators"
 )
@@ -247,6 +248,261 @@ func (s *SMAConfluenceStrategy) Signal(i int) SignalType {
 	return NoSignal
 }
 
+// ── ICT 2022 Mentorship Model ────────────────────────────────────────────
+//
+// 6-step framework: liquidity grab → displacement + FVG → MSS → fib 50%
+// → FVG validation → entry. Supports both bullish (SSL grab) and bearish
+// (BSL grab) setups.
+
+type ICTMentorshipStrategy struct {
+	bars        []data.OHLCV
+	atr         []float64
+	swingHighs  []float64
+	swingLows   []float64
+	swingPeriod int
+	dispMult    float64
+	bodyRatio   float64
+	fibValid    bool
+	lookback    int
+	lastSigBar  int // prevent double-signal on same setup
+}
+
+func (s *ICTMentorshipStrategy) Name() string { return "ICT 2022" }
+func (s *ICTMentorshipStrategy) Description() string {
+	return "ICT 6-step model: liquidity grab → displacement FVG → MSS → fib-validated entry"
+}
+func (s *ICTMentorshipStrategy) Init(bars []data.OHLCV, params map[string]float64) {
+	s.bars = bars
+	s.swingPeriod = int(getParam(params, "swing_period", 5))
+	atrPeriod := int(getParam(params, "atr_period", 14))
+	s.dispMult = getParam(params, "disp_mult", 1.5)
+	s.bodyRatio = getParam(params, "body_ratio", 0.6)
+	s.fibValid = getParam(params, "fvg_fib_valid", 1) == 1
+	s.lookback = int(getParam(params, "lookback", float64(s.swingPeriod*6)))
+	if s.lookback < s.swingPeriod*3 {
+		s.lookback = s.swingPeriod * 3
+	}
+	s.lastSigBar = -s.lookback
+
+	s.atr = indicators.ATR(bars, atrPeriod)
+	s.swingHighs = indicators.SwingHighs(bars, s.swingPeriod)
+	s.swingLows = indicators.SwingLows(bars, s.swingPeriod)
+}
+
+func (s *ICTMentorshipStrategy) Signal(i int) SignalType {
+	if i < s.swingPeriod*2+3 || math.IsNaN(s.atr[i]) {
+		return NoSignal
+	}
+	// Prevent double-signal within lookback window of same setup
+	if i-s.lastSigBar < s.swingPeriod {
+		return NoSignal
+	}
+
+	buy := s.checkBuy(i)
+	if buy {
+		s.lastSigBar = i
+		return BuySignal
+	}
+	sell := s.checkSell(i)
+	if sell {
+		s.lastSigBar = i
+		return SellSignal
+	}
+	return NoSignal
+}
+
+// checkBuy looks for a bullish ICT setup (SSL grab → bullish reversal)
+func (s *ICTMentorshipStrategy) checkBuy(i int) bool {
+	bars := s.bars
+	start := i - s.lookback
+	if start < s.swingPeriod {
+		start = s.swingPeriod
+	}
+
+	// Iterate through all confirmed swing lows in the lookback window (most recent first)
+	for j := i - s.swingPeriod - 1; j >= start; j-- {
+		if math.IsNaN(s.swingLows[j]) {
+			continue
+		}
+		swingLowPrice := s.swingLows[j]
+
+		// Step 1: Find a bar after the swing low that sweeps below it (liquidity grab)
+		grabIdx := -1
+		for g := j + 1; g <= i; g++ {
+			if bars[g].Low < swingLowPrice && bars[g].Close > swingLowPrice {
+				grabIdx = g
+				break
+			}
+		}
+		if grabIdx < 0 {
+			continue
+		}
+
+		// Step 2: Displacement candle + bullish FVG after the grab
+		dispIdx := -1
+		var fvgTop, fvgBot float64
+		for d := grabIdx + 1; d < i; d++ {
+			if math.IsNaN(s.atr[d]) || s.atr[d] == 0 {
+				continue
+			}
+			body := bars[d].Close - bars[d].Open
+			rng := bars[d].High - bars[d].Low
+			if rng == 0 {
+				continue
+			}
+			if body >= s.dispMult*s.atr[d] && body/rng >= s.bodyRatio {
+				if d-1 >= 0 && d+1 < len(bars) {
+					gapBot := bars[d-1].High
+					gapTop := bars[d+1].Low
+					if gapTop > gapBot {
+						dispIdx = d
+						fvgBot = gapBot
+						fvgTop = gapTop
+						break
+					}
+				}
+			}
+		}
+		if dispIdx < 0 {
+			continue
+		}
+
+		// Step 3: MSS — price must break above a recent swing high before the grab
+		swingHighPrice := 0.0
+		for k := grabIdx - 1; k >= start; k-- {
+			if !math.IsNaN(s.swingHighs[k]) {
+				swingHighPrice = s.swingHighs[k]
+				break
+			}
+		}
+		if swingHighPrice == 0 {
+			continue
+		}
+		foundMSS := false
+		for k := dispIdx; k <= i; k++ {
+			if bars[k].High > swingHighPrice {
+				foundMSS = true
+				break
+			}
+		}
+		if !foundMSS {
+			continue
+		}
+
+		// Step 4 & 5: Fibonacci 50% validation
+		if s.fibValid {
+			grabLow := bars[grabIdx].Low
+			dispHigh := bars[dispIdx].High
+			fib50 := grabLow + (dispHigh-grabLow)*0.5
+			if fvgBot > fib50 {
+				continue
+			}
+		}
+
+		// Step 6: Entry — current bar retraces into the FVG zone
+		if bars[i].Low <= fvgTop && bars[i].High >= fvgBot {
+			return true
+		}
+	}
+	return false
+}
+
+// checkSell looks for a bearish ICT setup (BSL grab → bearish reversal)
+func (s *ICTMentorshipStrategy) checkSell(i int) bool {
+	bars := s.bars
+	start := i - s.lookback
+	if start < s.swingPeriod {
+		start = s.swingPeriod
+	}
+
+	// Iterate through all confirmed swing highs in the lookback window
+	for j := i - s.swingPeriod - 1; j >= start; j-- {
+		if math.IsNaN(s.swingHighs[j]) {
+			continue
+		}
+		swingHighPrice := s.swingHighs[j]
+
+		// Step 1: Find a bar that sweeps above the swing high (BSL grab)
+		grabIdx := -1
+		for g := j + 1; g <= i; g++ {
+			if bars[g].High > swingHighPrice && bars[g].Close < swingHighPrice {
+				grabIdx = g
+				break
+			}
+		}
+		if grabIdx < 0 {
+			continue
+		}
+
+		// Step 2: Bearish displacement + bearish FVG after the grab
+		dispIdx := -1
+		var fvgTop, fvgBot float64
+		for d := grabIdx + 1; d < i; d++ {
+			if math.IsNaN(s.atr[d]) || s.atr[d] == 0 {
+				continue
+			}
+			body := bars[d].Open - bars[d].Close
+			rng := bars[d].High - bars[d].Low
+			if rng == 0 {
+				continue
+			}
+			if body >= s.dispMult*s.atr[d] && body/rng >= s.bodyRatio {
+				if d-1 >= 0 && d+1 < len(bars) {
+					gapTop := bars[d-1].Low
+					gapBot := bars[d+1].High
+					if gapTop > gapBot {
+						dispIdx = d
+						fvgTop = gapTop
+						fvgBot = gapBot
+						break
+					}
+				}
+			}
+		}
+		if dispIdx < 0 {
+			continue
+		}
+
+		// Step 3: MSS — price must break below a recent swing low
+		swingLowPrice := 0.0
+		for k := grabIdx - 1; k >= start; k-- {
+			if !math.IsNaN(s.swingLows[k]) {
+				swingLowPrice = s.swingLows[k]
+				break
+			}
+		}
+		if swingLowPrice == 0 {
+			continue
+		}
+		foundMSS := false
+		for k := dispIdx; k <= i; k++ {
+			if bars[k].Low < swingLowPrice {
+				foundMSS = true
+				break
+			}
+		}
+		if !foundMSS {
+			continue
+		}
+
+		// Step 4 & 5: Fibonacci 50% validation
+		if s.fibValid {
+			grabHigh := bars[grabIdx].High
+			dispLow := bars[dispIdx].Low
+			fib50 := dispLow + (grabHigh-dispLow)*0.5
+			if fvgTop < fib50 {
+				continue
+			}
+		}
+
+		// Step 6: Entry — current bar retraces into FVG zone
+		if bars[i].High >= fvgBot && bars[i].Low <= fvgTop {
+			return true
+		}
+	}
+	return false
+}
+
 // ── Strategy Registry ─────────────────────────────────────────────────────
 
 type StrategyMeta struct {
@@ -298,6 +554,31 @@ var StrategyRegistry = map[string]StrategyMeta{
 		Description: "Trend filter + momentum signal",
 		Params:      map[string]float64{"sma_period": 50, "rsi_period": 14, "overbought": 70, "oversold": 30},
 		Factory:     func() Strategy { return &SMAConfluenceStrategy{} },
+	},
+	"ict2022": {
+		Name:        "ICT 2022",
+		Description: "Liquidity grab → displacement FVG → MSS → fib-validated entry",
+		Params:      map[string]float64{"swing_period": 5, "atr_period": 14, "disp_mult": 1.5, "body_ratio": 0.6, "fvg_fib_valid": 1, "lookback": 30},
+		Factory:     func() Strategy { return &ICTMentorshipStrategy{} },
+	},
+	"ict_advanced": {
+		Name:        "ICT Advanced",
+		Description: "ICT 2022 + MTF bias, Kill Zones, CBDR/STD, NDOG/NWOG, SMT divergence",
+		Params: map[string]float64{
+			"swing_period":   5,
+			"atr_period":     14,
+			"disp_mult":      1.5,
+			"body_ratio":     0.6,
+			"fvg_fib_valid":  1,
+			"lookback":       30,
+			"htf_filter":     1,
+			"killzone_only":  0,
+			"cbdr_filter":    0,
+			"smt_confluence": 0,
+			"gap_awareness":  0,
+			"pd_arrays":      0,
+		},
+		Factory: func() Strategy { return &ICTAdvancedStrategy{} },
 	},
 }
 

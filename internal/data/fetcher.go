@@ -260,3 +260,37 @@ func FetchLatestPrice(ctx context.Context, symbolKey string) (float64, string, e
 func FormatNumber(f float64, decimals int) string {
 	return strconv.FormatFloat(f, 'f', decimals, 64)
 }
+
+// FetchMultiTF fetches the same symbol at multiple intervals.
+func FetchMultiTF(ctx context.Context, symbol string, intervals []string, period string) (map[string][]OHLCV, error) {
+	result := make(map[string][]OHLCV)
+	for _, iv := range intervals {
+		bars, err := FetchOHLCV(ctx, FetchParams{
+			Symbol:   symbol,
+			Interval: iv,
+			Period:   period,
+		})
+		if err != nil {
+			return nil, fmt.Errorf("fetch %s %s: %w", symbol, iv, err)
+		}
+		result[iv] = bars
+	}
+	return result, nil
+}
+
+// FetchMultiSymbol fetches multiple symbols at the same interval.
+func FetchMultiSymbol(ctx context.Context, symbols []string, interval, period string) (map[string][]OHLCV, error) {
+	result := make(map[string][]OHLCV)
+	for _, sym := range symbols {
+		bars, err := FetchOHLCV(ctx, FetchParams{
+			Symbol:   sym,
+			Interval: interval,
+			Period:   period,
+		})
+		if err != nil {
+			return nil, fmt.Errorf("fetch %s: %w", sym, err)
+		}
+		result[sym] = bars
+	}
+	return result, nil
+}
