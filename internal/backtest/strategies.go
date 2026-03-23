@@ -579,9 +579,53 @@ var StrategyRegistry = map[string]StrategyMeta{
 		},
 		Factory: func() Strategy { return &TurtleSoupStrategy{} },
 	},
+	"amd_session": {
+		Name:        "AMD Session",
+		Description: "ICT AMD: Accumulation → Manipulation → Distribution",
+		Params: map[string]float64{
+			"swing_period": 5, "atr_period": 14, "disp_mult": 1.0, "body_ratio": 0.5,
+		},
+		Factory: func() Strategy { return &AMDSessionStrategy{} },
+	},
+	"ob_retest": {
+		Name:        "OB Retest",
+		Description: "ICT Order Block Retest: enter on retrace into unmitigated OB",
+		Params: map[string]float64{
+			"swing_period": 5, "atr_period": 14, "ob_impulse": 1.5,
+			"min_ob_age": 5, "pd_lookback": 50, "use_pd_filter": 1,
+		},
+		Factory: func() Strategy { return &OBRetestStrategy{} },
+	},
+	"weekly_profile": {
+		Name:        "Weekly Profile",
+		Description: "ICT Weekly Profile: trade retraces to weekly open with PWH/PWL bias",
+		Params: map[string]float64{
+			"swing_period": 5, "atr_period": 14, "disp_mult": 1.0,
+			"body_ratio": 0.5, "touch_atr": 0.5,
+		},
+		Factory: func() Strategy { return &WeeklyProfileStrategy{} },
+	},
+	"breaker_entry": {
+		Name:        "Breaker Entry",
+		Description: "ICT Breaker Block: enter on retest of failed (flipped) OB",
+		Params: map[string]float64{
+			"swing_period": 5, "atr_period": 14, "ob_impulse": 1.5,
+			"min_age": 3, "pd_lookback": 50, "use_pd_filter": 0,
+		},
+		Factory: func() Strategy { return &BreakerEntryStrategy{} },
+	},
+	"cbdr_std": {
+		Name:        "CBDR STD",
+		Description: "ICT CBDR: mean-reversion at Asian range STD projections",
+		Params: map[string]float64{
+			"swing_period": 5, "atr_period": 14, "disp_mult": 0.5,
+			"body_ratio": 0.4, "min_std": 1.0, "max_std": 2.5,
+		},
+		Factory: func() Strategy { return &CBDRSTDStrategy{} },
+	},
 	"ict_advanced": {
 		Name:        "ICT Advanced",
-		Description: "ICT 2022 + MTF bias, Kill Zones, CBDR/STD, NDOG/NWOG, SMT divergence",
+		Description: "ICT 2022 + MTF bias, Kill Zones, CBDR/STD, NDOG/NWOG, SMT, Judas, IPDA",
 		Params: map[string]float64{
 			"swing_period":   5,
 			"atr_period":     14,
@@ -595,6 +639,10 @@ var StrategyRegistry = map[string]StrategyMeta{
 			"smt_confluence": 0,
 			"gap_awareness":  0,
 			"pd_arrays":      0,
+			"judas_swing":    0,
+			"liq_void":       0,
+			"ipda_filter":    0,
+			"bias9_step":     0,
 		},
 		Factory: func() Strategy { return &ICTAdvancedStrategy{} },
 	},

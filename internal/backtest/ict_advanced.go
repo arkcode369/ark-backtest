@@ -42,18 +42,29 @@ type ICTAdvancedStrategy struct {
 	pdResult    indicators.PremiumDiscountResult // cached per-bar premium/discount
 	usePDArrays bool
 
+	// ── Phase 4 fields ──
+	judasSwings  []JudasSwing
+	judasByIndex map[int]JudasSwing
+	liqVoids     []LiquidityVoid
+	ipdaStates   []IPDAState
+	dailyBias9   []int // enhanced 9-step bias (-4 to +4)
+
 	// ── Config toggles (from params) ──
 	useHTFFilter  bool
 	useKillZone   bool
 	useCBDR       bool
 	useSMT        bool
 	useGaps       bool
+	useJudas      bool
+	useLiqVoid    bool
+	useIPDA       bool
+	useBias9      bool
 	correlatedSym string
 }
 
 func (s *ICTAdvancedStrategy) Name() string { return "ICT Advanced" }
 func (s *ICTAdvancedStrategy) Description() string {
-	return "ICT 2022 + MTF bias, Kill Zones, CBDR/STD, NDOG/NWOG, SMT divergence"
+	return "ICT 2022 + MTF bias, Kill Zones, CBDR/STD, NDOG/NWOG, SMT, Judas Swing, Liquidity Void, IPDA"
 }
 
 // ── Strategy interface ──
@@ -78,6 +89,10 @@ func (s *ICTAdvancedStrategy) Init(bars []data.OHLCV, params map[string]float64)
 	s.useSMT = getParam(params, "smt_confluence", 0) == 1
 	s.useGaps = getParam(params, "gap_awareness", 0) == 1
 	s.usePDArrays = getParam(params, "pd_arrays", 0) == 1
+	s.useJudas = getParam(params, "judas_swing", 0) == 1
+	s.useLiqVoid = getParam(params, "liq_void", 0) == 1
+	s.useIPDA = getParam(params, "ipda_filter", 0) == 1
+	s.useBias9 = getParam(params, "bias9_step", 0) == 1
 
 	s.atr = indicators.ATR(bars, atrPeriod)
 	s.swingHighs = indicators.SwingHighs(bars, s.swingPeriod)
@@ -138,6 +153,36 @@ func (s *ICTAdvancedStrategy) InitSessions(sessions []SessionLabel) {
 		s.nwogGaps = DetectNWOG(daily)
 	} else {
 		s.nwogGaps = DetectNWOG(s.bars)
+	}
+
+	// Phase 4: Judas Swing detection
+	if s.useJudas {
+		s.judasSwings = DetectJudasSwings(s.bars, sessions, 5)
+		s.judasByIndex = make(map[int]JudasSwing)
+		for _, js := range s.judasSwings {
+			s.judasByIndex[js.Index] = js
+		}
+	}
+
+	// Phase 4: Liquidity Voids
+	if s.useLiqVoid {
+		s.liqVoids = DetectLiquidityVoids(s.bars, s.atr, 2.0)
+	}
+
+	// Phase 4: IPDA state machine
+	if s.useIPDA {
+		s.ipdaStates = ComputeIPDAState(s.bars, s.atr, s.swingHighs, s.swingLows)
+	}
+
+	// Phase 4: Enhanced 9-step daily bias
+	if s.useBias9 {
+		daily, _ := s.htfBars["1d"]
+		if len(daily) > 0 && len(s.htfIndex) > 0 {
+			s.dailyBias9 = DailyBias9Step(
+				s.bars, daily, s.htfIndex, sessions,
+				s.cbdrResults, s.ndogGaps, s.nwogGaps, s.atr,
+			)
+		}
 	}
 }
 
@@ -234,6 +279,103 @@ func (s *ICTAdvancedStrategy) Signal(i int) SignalType {
 		}
 		if sell && !s.hasPDConfluence(i, indicators.Bearish) {
 			sell = false
+		}
+	}
+
+	// Phase 4: Judas Swing filter — require Judas Swing alignment nearby
+	if s.useJudas && s.judasByIndex != nil {
+		if buy {
+			found := false
+			for j := max(0, i-s.swingPeriod*2); j <= i; j++ {
+				if js, ok := s.judasByIndex[j]; ok && js.Direction == 1 {
+					found = true
+					break
+				}
+			}
+			if !found {
+				buy = false
+			}
+		}
+		if sell {
+			found := false
+			for j := max(0, i-s.swingPeriod*2); j <= i; j++ {
+				if js, ok := s.judasByIndex[j]; ok && js.Direction == -1 {
+					found = true
+					break
+				}
+			}
+			if !found {
+				sell = false
+			}
+		}
+	}
+
+	// Phase 4: Liquidity Void filter — prefer entries toward unfilled voids
+	if s.useLiqVoid && len(s.liqVoids) > 0 {
+		price := s.bars[i].Close
+		if buy {
+			// Look for an unfilled bullish void above current price (target)
+			hasTarget := false
+			for _, v := range s.liqVoids {
+				if v.Direction == -1 && !v.Filled && v.Bottom > price {
+					hasTarget = true // bearish void above = price wants to fill it (go up)
+					break
+				}
+			}
+			if !hasTarget {
+				// Or check if we're at the bottom of an unfilled bullish void
+				for _, v := range s.liqVoids {
+					if v.Direction == 1 && !v.Filled && price >= v.Bottom && price <= v.Top {
+						hasTarget = true
+						break
+					}
+				}
+			}
+			if !hasTarget {
+				buy = false
+			}
+		}
+		if sell {
+			hasTarget := false
+			for _, v := range s.liqVoids {
+				if v.Direction == 1 && !v.Filled && v.Top < price {
+					hasTarget = true // bullish void below = price wants to fill it (go down)
+					break
+				}
+			}
+			if !hasTarget {
+				for _, v := range s.liqVoids {
+					if v.Direction == -1 && !v.Filled && price >= v.Bottom && price <= v.Top {
+						hasTarget = true
+						break
+					}
+				}
+			}
+			if !hasTarget {
+				sell = false
+			}
+		}
+	}
+
+	// Phase 4: IPDA state filter — prefer entries during retracement or reversal
+	if s.useIPDA && s.ipdaStates != nil && i < len(s.ipdaStates) {
+		state := s.ipdaStates[i]
+		// Skip signals during pure consolidation (low probability)
+		if state == IPDAConsolidation {
+			buy = false
+			sell = false
+		}
+	}
+
+	// Phase 4: Enhanced 9-step bias — use stronger bias score
+	if s.useBias9 && s.dailyBias9 != nil && i < len(s.dailyBias9) {
+		b9 := s.dailyBias9[i]
+		// Require at least 2 confluences in the right direction
+		if buy && b9 < -1 {
+			buy = false // strong bearish bias, don't buy
+		}
+		if sell && b9 > 1 {
+			sell = false // strong bullish bias, don't sell
 		}
 	}
 
