@@ -646,6 +646,177 @@ var StrategyRegistry = map[string]StrategyMeta{
 		},
 		Factory: func() Strategy { return &ICTAdvancedStrategy{} },
 	},
+	"cpe_entry": {
+		Name:        "CPE Entry",
+		Description: "Close Proximity Entry: session open retrace after displacement",
+		Params: map[string]float64{
+			"swing_period": 5, "atr_period": 14, "disp_mult": 1.0,
+			"body_ratio": 0.5, "proximity_atr": 0.5,
+		},
+		Factory: func() Strategy { return &CPEEntryStrategy{} },
+	},
+	"london_close": {
+		Name:        "London Close",
+		Description: "London Close Kill Zone: reversal of London move during close window",
+		Params: map[string]float64{
+			"swing_period": 5, "atr_period": 14, "disp_mult": 1.0,
+			"body_ratio": 0.5,
+		},
+		Factory: func() Strategy { return &LondonCloseStrategy{} },
+	},
+	"ny_open_rule": {
+		Name:        "NY Open Rule",
+		Description: "Compare London direction with NY open for continuation or reversal",
+		Params: map[string]float64{
+			"swing_period": 5, "atr_period": 14, "disp_mult": 1.0,
+			"body_ratio": 0.5, "mode": 0,
+		},
+		Factory: func() Strategy { return &NYOpenRuleStrategy{} },
+	},
+	"dow_pattern": {
+		Name:        "DOW Pattern",
+		Description: "Day-of-week ICT tendencies with reversal bias on Wed/Thu",
+		Params: map[string]float64{
+			"swing_period": 5, "atr_period": 14, "disp_mult": 1.0,
+			"body_ratio": 0.5, "trade_monday": 0, "trade_tuesday": 0,
+			"trade_wednesday": 1, "trade_thursday": 1, "trade_friday": 0,
+		},
+		Factory: func() Strategy { return &DOWPatternStrategy{} },
+	},
+	"daily_template": {
+		Name:        "Daily Template",
+		Description: "Classify intraday into session templates and trade accordingly",
+		Params: map[string]float64{
+			"swing_period": 5, "atr_period": 14, "disp_mult": 1.0,
+			"body_ratio": 0.5, "template_mode": 0,
+		},
+		Factory: func() Strategy { return &DailyTemplateStrategy{} },
+	},
+	"hod_lod": {
+		Name:        "HOD/LOD Projection",
+		Description: "Project daily HOD/LOD via CBDR STD levels; reversal at projected extremes",
+		Params: map[string]float64{
+			"swing_period": 5, "atr_period": 14, "disp_mult": 0.5,
+			"body_ratio": 0.4, "min_std": 1.0, "max_std": 2.5,
+		},
+		Factory: func() Strategy { return &HODLODStrategy{} },
+	},
+	"flout": {
+		Name:        "Flout",
+		Description: "CBDR + Asian range combined (Flout) STD projections with displacement reversal",
+		Params: map[string]float64{
+			"swing_period": 5, "atr_period": 14, "disp_mult": 0.5,
+			"body_ratio": 0.4, "min_std": 1.0, "max_std": 2.5, "flout_mode": 0,
+		},
+		Factory: func() Strategy { return &FloutStrategy{} },
+	},
+	"intermarket": {
+		Name:        "Intermarket",
+		Description: "MTF mean-reversion: buy HTF-trend dips, sell HTF-trend rips",
+		Params: map[string]float64{
+			"swing_period": 5, "atr_period": 14, "disp_mult": 1.0,
+			"body_ratio": 0.5, "reversion_atr": 1.5, "htf_lookback": 20,
+		},
+		Factory: func() Strategy { return &IntermarketStrategy{} },
+	},
+	"cot_proxy": {
+		Name:        "COT Proxy",
+		Description: "Volume-based institutional positioning proxy: price-volume divergence",
+		Params: map[string]float64{
+			"swing_period": 5, "atr_period": 14, "disp_mult": 1.0,
+			"body_ratio": 0.5, "vol_period": 20, "divergence_threshold": 0.5,
+		},
+		Factory: func() Strategy { return &COTProxyStrategy{} },
+	},
+	"megatrade": {
+		Name:        "Megatrade",
+		Description: "Multi-week swing trades on mega-structure shifts (large-TF CHoCH)",
+		Params: map[string]float64{
+			"swing_period": 10, "atr_period": 20, "disp_mult": 2.0,
+			"body_ratio": 0.5, "min_swing_count": 3, "lookback": 100,
+		},
+		Factory: func() Strategy { return &MegatradeStrategy{} },
+	},
+	"mss_choch": {
+		Name:        "MSS/CHoCH",
+		Description: "Market Structure Shift / Change of Character with displacement entry",
+		Params: map[string]float64{
+			"swing_period": 5, "atr_period": 14, "disp_mult": 1.0,
+			"body_ratio": 0.5, "lookback": 30,
+		},
+		Factory: func() Strategy { return &MSSCHoCHStrategy{} },
+	},
+	"ote_entry": {
+		Name:        "OTE Entry",
+		Description: "Optimal Trade Entry: 62-79% fib retracement at FVG after impulse",
+		Params: map[string]float64{
+			"swing_period": 5, "atr_period": 14, "disp_mult": 1.5,
+			"body_ratio": 0.6, "fib_low": 0.62, "fib_high": 0.79, "lookback": 30,
+		},
+		Factory: func() Strategy { return &OTEEntryStrategy{} },
+	},
+	"mm_model": {
+		Name:        "Market Maker Model",
+		Description: "Full MM model: consolidation → sweep → displacement → FVG → OTE entry",
+		Params: map[string]float64{
+			"swing_period": 5, "atr_period": 14, "disp_mult": 1.5,
+			"body_ratio": 0.6, "consol_bars": 10, "consol_atr": 1.5, "lookback": 40,
+		},
+		Factory: func() Strategy { return &MarketMakerModelStrategy{} },
+	},
+	"three_drives": {
+		Name:        "Three Drives",
+		Description: "Three progressive swing points with fib extensions → reversal",
+		Params: map[string]float64{
+			"swing_period": 5, "atr_period": 14, "disp_mult": 1.0,
+			"body_ratio": 0.5, "fib_min": 1.1, "fib_max": 1.8, "lookback": 50,
+		},
+		Factory: func() Strategy { return &ThreeDrivesStrategy{} },
+	},
+	"lrlr_entry": {
+		Name:        "HRLR→LRLR",
+		Description: "Detect transition from choppy (HRLR) to trending (LRLR) and enter",
+		Params: map[string]float64{
+			"swing_period": 5, "atr_period": 14, "disp_mult": 1.0,
+			"body_ratio": 0.5, "chop_period": 20, "chop_threshold": 0.5,
+		},
+		Factory: func() Strategy { return &LRLREntryStrategy{} },
+	},
+	"irl_erl": {
+		Name:        "IRL→ERL",
+		Description: "Enter at internal liquidity (FVG/OB) targeting external liquidity (swing H/L)",
+		Params: map[string]float64{
+			"swing_period": 5, "atr_period": 14, "ob_impulse": 1.5, "pd_lookback": 50,
+		},
+		Factory: func() Strategy { return &IRLERLStrategy{} },
+	},
+	"open_float": {
+		Name:        "Open Float",
+		Description: "Sweep of 20/40/60-day H/L institutional liquidity pools → reversal",
+		Params: map[string]float64{
+			"swing_period": 5, "atr_period": 14, "disp_mult": 1.5,
+			"body_ratio": 0.6, "pool_20": 1, "pool_40": 1, "pool_60": 1,
+		},
+		Factory: func() Strategy { return &OpenFloatStrategy{} },
+	},
+	"ce_entry": {
+		Name:        "CE Entry",
+		Description: "Consequent Encroachment: enter at FVG midpoint (50% of gap)",
+		Params: map[string]float64{
+			"swing_period": 5, "atr_period": 14, "ob_impulse": 1.5,
+			"max_fvg_age": 30, "touch_tolerance": 0.2,
+		},
+		Factory: func() Strategy { return &CEEntryStrategy{} },
+	},
+	"event_horizon": {
+		Name:        "Event Horizon",
+		Description: "Trade at midpoint between adjacent NWOGs (gravitational price level)",
+		Params: map[string]float64{
+			"swing_period": 5, "atr_period": 14, "disp_mult": 0.5,
+			"body_ratio": 0.4, "touch_atr": 1.0,
+		},
+		Factory: func() Strategy { return &EventHorizonStrategy{} },
+	},
 }
 
 func getParam(params map[string]float64, key string, def float64) float64 {
