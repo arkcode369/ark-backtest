@@ -561,6 +561,24 @@ var StrategyRegistry = map[string]StrategyMeta{
 		Params:      map[string]float64{"swing_period": 5, "atr_period": 14, "disp_mult": 1.5, "body_ratio": 0.6, "fvg_fib_valid": 1, "lookback": 30},
 		Factory:     func() Strategy { return &ICTMentorshipStrategy{} },
 	},
+	"silver_bullet": {
+		Name:        "Silver Bullet",
+		Description: "ICT Silver Bullet: sweep + FVG in 3 daily kill-zone windows",
+		Params: map[string]float64{
+			"swing_period": 5, "atr_period": 14, "disp_mult": 1.0,
+			"body_ratio": 0.5, "sb_lookback": 20,
+		},
+		Factory: func() Strategy { return &SilverBulletStrategy{} },
+	},
+	"turtle_soup": {
+		Name:        "Turtle Soup",
+		Description: "ICT Turtle Soup: sweep of swing H/L → displacement reversal",
+		Params: map[string]float64{
+			"swing_period": 5, "atr_period": 14, "disp_mult": 1.5,
+			"body_ratio": 0.6, "ts_lookback": 30, "equal_tol": 0.1, "require_equal": 0,
+		},
+		Factory: func() Strategy { return &TurtleSoupStrategy{} },
+	},
 	"ict_advanced": {
 		Name:        "ICT Advanced",
 		Description: "ICT 2022 + MTF bias, Kill Zones, CBDR/STD, NDOG/NWOG, SMT divergence",
