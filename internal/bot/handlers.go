@@ -189,6 +189,8 @@ func (b *Bot) handleMessage(msg *tgbotapi.Message) {
 		b.handleIntervals(chatID)
 	case "strategies":
 		b.handleListStrategies(chatID)
+	case "si":
+		b.handleStrategyInfo(chatID, args)
 	case "list":
 		b.handleListFiles(chatID)
 	default:
@@ -206,6 +208,8 @@ func (b *Bot) sendStart(chatID int64) {
 		"*Quick Start:*\n" +
 		"• /symbols — browse all supported instruments\n" +
 		"• /price XAUUSD — get latest price\n" +
+		"• /strategies — browse all strategies\n" +
+		"• /si ict2022 — detailed strategy info & presets\n" +
 		"• /backtest XAUUSD 1d ema\\_cross — run a backtest\n" +
 		"• /strategy — start AI strategy builder\n" +
 		"• /help — full command reference"
@@ -235,7 +239,8 @@ func (b *Bot) sendHelp(chatID int64) {
 		"`/genmd [name]` — generate strategy document (.md file)\n" +
 		"`/analyze [question]` — quick AI market analysis\n\n" +
 		"*📋 Info*\n" +
-		"`/strategies` — list built-in strategies\n" +
+		"`/strategies` — list all strategies with descriptions\n" +
+		"`/si <strategy>` — detailed strategy info, params & presets\n" +
 		"`/list` — list saved strategy documents\n\n" +
 		"*⚙️ Backtest Options (add to command)*\n" +
 		"  `capital=10000` — starting capital (default: 10000)\n" +
@@ -356,17 +361,123 @@ func (b *Bot) handleIntervals(chatID int64) {
 
 func (b *Bot) handleListStrategies(chatID int64) {
 	var sb strings.Builder
-	sb.WriteString("📈 *Built-in Strategies*\n\n")
-	for key, meta := range backtest.StrategyRegistry {
-		sb.WriteString(fmt.Sprintf("• `%s` — *%s*\n  _%s_\n  Params: ", key, meta.Name, meta.Description))
-		var params []string
-		for k, v := range meta.Params {
-			params = append(params, fmt.Sprintf("%s=%.0f", k, v))
+	sb.WriteString("📈 *Strategy Menu*\n\n")
+
+	// Group by category in display order
+	currentCat := ""
+	for _, key := range backtest.CatalogOrder {
+		cat, ok := backtest.StrategyCatalog[key]
+		if !ok {
+			continue
 		}
-		sb.WriteString(strings.Join(params, ", "))
-		sb.WriteString("\n\n")
+		if cat.Category != currentCat {
+			currentCat = cat.Category
+			if currentCat == "Classic" {
+				sb.WriteString("━━━ *Classic Strategies* ━━━\n\n")
+			} else {
+				sb.WriteString("\n━━━ *ICT Strategies* ━━━\n\n")
+			}
+		}
+		sb.WriteString(fmt.Sprintf("%s `%s` — *%s*\n", cat.Emoji, key, backtest.StrategyRegistry[key].Name))
+		sb.WriteString(fmt.Sprintf("    %s\n", cat.ShortDesc))
+		sb.WriteString(fmt.Sprintf("    TF: %s\n\n", cat.RecommendedTF))
 	}
-	sb.WriteString("Usage: `/backtest SYMBOL INTERVAL STRATEGY [param=value ...]`")
+
+	sb.WriteString("━━━━━━━━━━━━━━━━━━━━━━━━\n\n")
+	sb.WriteString("*Detail strategy:* `/si <nama>`\n")
+	sb.WriteString("  Contoh: `/si ict2022`\n\n")
+	sb.WriteString("*Quick backtest:* `/backtest SYMBOL TF STRATEGY`\n")
+	sb.WriteString("  Contoh: `/backtest XAUUSD 1d ema_cross`\n\n")
+	sb.WriteString("*Preset:* `/si <nama>` lalu copy preset yg mau dipakai")
+
+	b.sendMD(chatID, sb.String())
+}
+
+func (b *Bot) handleStrategyInfo(chatID int64, args string) {
+	if args == "" {
+		b.send(chatID, "Usage: /si <strategy_key>\nExample: /si ict2022\n\nUse /strategies to see all available strategies.")
+		return
+	}
+
+	key := strings.ToLower(strings.TrimSpace(args))
+	cat, ok := backtest.StrategyCatalog[key]
+	if !ok {
+		// Try partial match
+		var matches []string
+		for k := range backtest.StrategyCatalog {
+			if strings.Contains(k, key) {
+				matches = append(matches, k)
+			}
+		}
+		if len(matches) == 1 {
+			key = matches[0]
+			cat = backtest.StrategyCatalog[key]
+		} else if len(matches) > 1 {
+			var sb strings.Builder
+			sb.WriteString(fmt.Sprintf("Multiple matches for '%s':\n", key))
+			for _, m := range matches {
+				sb.WriteString(fmt.Sprintf("  /si %s\n", m))
+			}
+			b.send(chatID, sb.String())
+			return
+		} else {
+			b.send(chatID, fmt.Sprintf("Strategy '%s' not found.\nUse /strategies to see all available strategies.", key))
+			return
+		}
+	}
+
+	meta := backtest.StrategyRegistry[key]
+
+	var sb strings.Builder
+	sb.WriteString(fmt.Sprintf("%s *%s* (`%s`)\n", cat.Emoji, meta.Name, key))
+	sb.WriteString(fmt.Sprintf("Category: %s | TF: %s\n\n", cat.Category, cat.RecommendedTF))
+
+	// How It Works
+	sb.WriteString("*Cara Kerja:*\n")
+	sb.WriteString(cat.HowItWorks)
+	sb.WriteString("\n\n")
+
+	// When To Use
+	sb.WriteString("*Kapan Digunakan:*\n")
+	sb.WriteString(cat.WhenToUse)
+	sb.WriteString("\n\n")
+
+	// Parameters
+	sb.WriteString("*Parameter:*\n")
+	for _, p := range cat.ParamDetails {
+		sb.WriteString(fmt.Sprintf("  `%s` = %s", p.Key, p.Label))
+		if p.Default == float64(int(p.Default)) {
+			sb.WriteString(fmt.Sprintf(" (default: %.0f)", p.Default))
+		} else {
+			sb.WriteString(fmt.Sprintf(" (default: %g)", p.Default))
+		}
+		sb.WriteString(fmt.Sprintf("\n    _%s_\n", p.Description))
+	}
+	sb.WriteString("\n")
+
+	// Presets
+	if len(cat.Presets) > 0 {
+		sb.WriteString("*Preset (copy-paste ready):*\n\n")
+		for _, pr := range cat.Presets {
+			sb.WriteString(fmt.Sprintf("_%s_\n", pr.Label))
+			sb.WriteString(fmt.Sprintf("`/backtest XAUUSD 1h %s", key))
+			for _, pd := range cat.ParamDetails {
+				if v, ok := pr.Params[pd.Key]; ok {
+					if v == float64(int(v)) {
+						sb.WriteString(fmt.Sprintf(" %s=%.0f", pd.Key, v))
+					} else {
+						sb.WriteString(fmt.Sprintf(" %s=%g", pd.Key, v))
+					}
+				}
+			}
+			sb.WriteString(" sl=0.005 tp=0.01`\n\n")
+		}
+	}
+
+	// Example
+	sb.WriteString("*Contoh:*\n")
+	sb.WriteString(fmt.Sprintf("`%s`", cat.ExampleCommand))
+
 	b.sendMD(chatID, sb.String())
 }
 
@@ -390,6 +501,35 @@ func (b *Bot) handleBacktest(chatID int64, args string) {
 
 	// Parse key=value options
 	opts := parseOptions(parts[3:])
+
+	// Apply preset if specified (e.g., preset=strict)
+	if presetName, ok := opts["preset"]; ok {
+		if cat, catOK := backtest.StrategyCatalog[stratKey]; catOK {
+			found := false
+			for _, pr := range cat.Presets {
+				if strings.EqualFold(pr.Name, presetName) {
+					for k, v := range pr.Params {
+						// Only apply preset value if user didn't explicitly set it
+						if _, userSet := opts[k]; !userSet {
+							opts[k] = fmt.Sprintf("%g", v)
+						}
+					}
+					found = true
+					break
+				}
+			}
+			if !found {
+				var names []string
+				for _, pr := range cat.Presets {
+					names = append(names, pr.Name)
+				}
+				b.send(chatID, fmt.Sprintf("❌ Preset '%s' not found for %s.\nAvailable: %s\nUse /si %s to see preset details.", presetName, stratKey, strings.Join(names, ", "), stratKey))
+				return
+			}
+		}
+		delete(opts, "preset")
+	}
+
 	stratParams := extractStratParams(opts, stratKey)
 
 	// Engine config
