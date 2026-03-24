@@ -35,7 +35,7 @@ func TestLabelSessions_KillZones(t *testing.T) {
 
 func TestComputeCBDR_BasicRange(t *testing.T) {
 	// Create bars in the Asian session window (18:00-23:59 EST = 23:00-04:59 UTC)
-	est := time.FixedZone("EST", -5*3600)
+	est := estLoc
 	bars := []data.OHLCV{
 		{Time: time.Date(2024, 1, 15, 18, 0, 0, 0, est), Open: 100, High: 105, Low: 98, Close: 102},
 		{Time: time.Date(2024, 1, 15, 19, 0, 0, 0, est), Open: 102, High: 108, Low: 100, Close: 106},

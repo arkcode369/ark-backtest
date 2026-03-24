@@ -32,6 +32,9 @@ func (s *EMACrossStrategy) Signal(i int) SignalType {
 	}
 	prevFast, prevSlow := s.fast[i-1], s.slow[i-1]
 	curFast, curSlow := s.fast[i], s.slow[i]
+	if math.IsNaN(prevFast) || math.IsNaN(prevSlow) || math.IsNaN(curFast) || math.IsNaN(curSlow) {
+		return NoSignal
+	}
 	if prevFast <= prevSlow && curFast > curSlow {
 		return BuySignal
 	}
@@ -67,6 +70,9 @@ func (s *RSIStrategy) Signal(i int) SignalType {
 		return NoSignal
 	}
 	prev, cur := s.rsi[i-1], s.rsi[i]
+	if math.IsNaN(prev) || math.IsNaN(cur) {
+		return NoSignal
+	}
 	if prev <= s.oversold && cur > s.oversold {
 		return BuySignal
 	}
@@ -101,6 +107,9 @@ func (s *MACDStrategy) Signal(i int) SignalType {
 	}
 	prevM, prevS := s.macd.MACD[i-1], s.macd.Signal[i-1]
 	curM, curS := s.macd.MACD[i], s.macd.Signal[i]
+	if math.IsNaN(prevM) || math.IsNaN(prevS) || math.IsNaN(curM) || math.IsNaN(curS) {
+		return NoSignal
+	}
 	if prevM <= prevS && curM > curS {
 		return BuySignal
 	}
@@ -134,6 +143,9 @@ func (s *BBBreakoutStrategy) Signal(i int) SignalType {
 	}
 	c := s.bars[i].Close
 	prev := s.bars[i-1].Close
+	if math.IsNaN(s.bb.Upper[i-1]) || math.IsNaN(s.bb.Lower[i-1]) || math.IsNaN(c) || math.IsNaN(prev) {
+		return NoSignal
+	}
 	if prev <= s.bb.Upper[i-1] && c > s.bb.Upper[i-1] {
 		return BuySignal
 	}
@@ -198,6 +210,9 @@ func (s *DonchianStrategy) Signal(i int) SignalType {
 	l := s.bars[i].Low
 	prevHi := s.donchian.Upper[i-1]
 	prevLo := s.donchian.Lower[i-1]
+	if math.IsNaN(prevHi) || math.IsNaN(prevLo) {
+		return NoSignal
+	}
 	if h > prevHi {
 		return BuySignal
 	}
@@ -238,6 +253,9 @@ func (s *SMAConfluenceStrategy) Signal(i int) SignalType {
 	c := s.bars[i].Close
 	sma := s.sma[i]
 	prevRSI, curRSI := s.rsi[i-1], s.rsi[i]
+	if math.IsNaN(sma) || math.IsNaN(prevRSI) || math.IsNaN(curRSI) {
+		return NoSignal
+	}
 
 	if c > sma && prevRSI <= s.os && curRSI > s.os {
 		return BuySignal
@@ -341,7 +359,7 @@ func (s *ICTMentorshipStrategy) checkBuy(i int) bool {
 		// Step 2: Displacement candle + bullish FVG after the grab
 		dispIdx := -1
 		var fvgTop, fvgBot float64
-		for d := grabIdx + 1; d < i; d++ {
+		for d := grabIdx + 1; d < i-1; d++ {
 			if math.IsNaN(s.atr[d]) || s.atr[d] == 0 {
 				continue
 			}
@@ -437,7 +455,7 @@ func (s *ICTMentorshipStrategy) checkSell(i int) bool {
 		// Step 2: Bearish displacement + bearish FVG after the grab
 		dispIdx := -1
 		var fvgTop, fvgBot float64
-		for d := grabIdx + 1; d < i; d++ {
+		for d := grabIdx + 1; d < i-1; d++ {
 			if math.IsNaN(s.atr[d]) || s.atr[d] == 0 {
 				continue
 			}

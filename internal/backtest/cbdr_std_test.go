@@ -7,7 +7,7 @@ import (
 )
 
 func makeCBDRBars() []data.OHLCV {
-	est := time.FixedZone("EST", -5*3600)
+	est := estLoc
 	bars := make([]data.OHLCV, 0)
 
 	// Asian session bars (19:00-23:59 EST on June 9) — range 99.5-100.5 (CBDR range = 1.0)

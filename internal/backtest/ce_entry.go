@@ -89,7 +89,8 @@ func (s *CEEntryStrategy) Signal(i int) SignalType {
 			continue
 		}
 		// Must not be mitigated before current bar.
-		if fvg.Mitigated && fvg.MitIndex < i {
+		// Do NOT check fvg.Mitigated (precomputed over entire dataset = look-ahead bias).
+		if fvg.MitIndex >= 0 && fvg.MitIndex < i {
 			continue
 		}
 

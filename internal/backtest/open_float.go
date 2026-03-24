@@ -78,9 +78,9 @@ func (s *OpenFloatStrategy) Init(bars []data.OHLCV, params map[string]float64) {
 			highs[i] = math.NaN()
 			lows[i] = math.NaN()
 		}
-		for i := period - 1; i < n; i++ {
-			hi := bars[i].High
-			lo := bars[i].Low
+		for i := period; i < n; i++ {
+			hi := bars[i-period].High
+			lo := bars[i-period].Low
 			for j := i - period + 1; j < i; j++ {
 				if bars[j].High > hi {
 					hi = bars[j].High
@@ -106,7 +106,6 @@ func (s *OpenFloatStrategy) Signal(i int) SignalType {
 	}
 
 	bar := s.bars[i]
-	prev := s.bars[i-1]
 	rng := bar.High - bar.Low
 	if rng == 0 {
 		return NoSignal
@@ -121,19 +120,19 @@ func (s *OpenFloatStrategy) Signal(i int) SignalType {
 		if i < period {
 			continue
 		}
-		poolHigh := s.rollingHighs[period][i-1] // use previous bar's rolling level
-		poolLow := s.rollingLows[period][i-1]
+		poolHigh := s.rollingHighs[period][i] // rolling level at i excludes bar i
+		poolLow := s.rollingLows[period][i]
 		if math.IsNaN(poolHigh) || math.IsNaN(poolLow) {
 			continue
 		}
 
-		// Bullish: previous bar swept below pool low, current bar is bullish displacement
-		if prev.Low < poolLow && isBullDisp {
+		// Bullish: current bar swept below pool low and is bullish displacement
+		if s.bars[i].Low < poolLow && isBullDisp {
 			s.lastSigBar = i
 			return BuySignal
 		}
-		// Bearish: previous bar swept above pool high, current bar is bearish displacement
-		if prev.High > poolHigh && isBearDisp {
+		// Bearish: current bar swept above pool high and is bearish displacement
+		if s.bars[i].High > poolHigh && isBearDisp {
 			s.lastSigBar = i
 			return SellSignal
 		}

@@ -93,8 +93,9 @@ func (s *BreakerEntryStrategy) Signal(i int) SignalType {
 			continue
 		}
 
-		// Skip if already mitigated before current bar
-		if bk.Mitigated && bk.MitIndex < i {
+		// Skip only if mitigated before current bar.
+		// Do NOT check bk.Mitigated (precomputed over entire dataset = look-ahead bias).
+		if bk.MitIndex >= 0 && bk.MitIndex < i {
 			continue
 		}
 

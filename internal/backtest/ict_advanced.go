@@ -1,6 +1,7 @@
 package backtest
 
 import (
+	"log/slog"
 	"math"
 	"trading-backtest-bot/internal/data"
 	"trading-backtest-bot/internal/indicators"
@@ -197,7 +198,12 @@ func (s *ICTAdvancedStrategy) Signal(i int) SignalType {
 	}
 
 	// Kill Zone filter: if enabled, only generate signals during kill zones
-	if s.useKillZone && s.sessions != nil && i < len(s.sessions) {
+	if s.useKillZone {
+		if s.sessions == nil || i >= len(s.sessions) {
+			slog.Warn("kill zone filter enabled but sessions not initialized; skipping signal",
+				"bar_index", i)
+			return NoSignal
+		}
 		if !s.sessions[i].IsKillZone {
 			return NoSignal
 		}

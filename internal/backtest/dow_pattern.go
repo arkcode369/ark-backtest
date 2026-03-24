@@ -63,7 +63,7 @@ func (s *DOWPatternStrategy) Init(bars []data.OHLCV, params map[string]float64) 
 	s.dispMult = getParam(params, "disp_mult", 1.0)
 	s.bodyRatio = getParam(params, "body_ratio", 0.5)
 	s.lastSigBar = -20
-	s.est = time.FixedZone("EST", -5*3600)
+	s.est = estLoc
 
 	// Configure allowed trading days
 	s.tradeDays = [7]bool{}

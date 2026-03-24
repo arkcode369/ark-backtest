@@ -2,7 +2,6 @@ package backtest
 
 import (
 	"math"
-	"time"
 	"trading-backtest-bot/internal/data"
 )
 
@@ -259,7 +258,7 @@ func DailyBias9Step(
 		return bias
 	}
 
-	est := time.FixedZone("EST", -5*3600)
+	est := estLoc
 
 	// Pre-compute weekly opens
 	weeklyOpen := make(map[int]float64) // isoYear*100+isoWeek → open
@@ -394,7 +393,7 @@ func ComputeIPDAState(bars []data.OHLCV, atr []float64, swingHighs, swingLows []
 	n := len(bars)
 	states := make([]IPDAState, n)
 
-	// Rolling ATR average for comparison
+	// Rolling ATR average for comparison (simple sliding window of last atrAvgLen non-NaN values)
 	const atrAvgLen = 20
 	atrAvg := make([]float64, n)
 	sum := 0.0
@@ -406,14 +405,25 @@ func ComputeIPDAState(bars []data.OHLCV, atr []float64, swingHighs, swingLows []
 		}
 		sum += atr[i]
 		cnt++
+		// Remove the element leaving the window: the non-NaN value exactly
+		// atrAvgLen non-NaN entries ago. Walk backward from i-1 to find it.
 		if cnt > atrAvgLen {
-			// Subtract oldest
-			for back := i - atrAvgLen; back >= 0; back-- {
+			removed := false
+			nonNaNSeen := 0
+			for back := i - 1; back >= 0; back-- {
 				if !math.IsNaN(atr[back]) {
-					sum -= atr[back]
-					cnt--
-					break
+					nonNaNSeen++
+					if nonNaNSeen == atrAvgLen {
+						sum -= atr[back]
+						cnt--
+						removed = true
+						break
+					}
 				}
+			}
+			if !removed {
+				// Fallback: should not happen, but protect against drift
+				cnt = atrAvgLen
 			}
 		}
 		if cnt > 0 {

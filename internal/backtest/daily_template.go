@@ -82,7 +82,7 @@ func (s *DailyTemplateStrategy) Init(bars []data.OHLCV, params map[string]float6
 	s.bodyRatio = getParam(params, "body_ratio", 0.5)
 	s.mode = int(getParam(params, "template_mode", 0))
 	s.lastSigBar = -20
-	s.est = time.FixedZone("EST", -5*3600)
+	s.est = estLoc
 
 	s.atr = indicators.ATR(bars, atrPeriod)
 	s.swingHighs = indicators.SwingHighs(bars, s.swingPeriod)

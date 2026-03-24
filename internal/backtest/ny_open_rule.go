@@ -68,7 +68,7 @@ func (s *NYOpenRuleStrategy) Init(bars []data.OHLCV, params map[string]float64) 
 	s.bodyRatio = getParam(params, "body_ratio", 0.5)
 	s.mode = int(getParam(params, "mode", 0))
 	s.lastSigBar = -20
-	s.est = time.FixedZone("EST", -5*3600)
+	s.est = estLoc
 
 	s.atr = indicators.ATR(bars, atrPeriod)
 	s.swingHighs = indicators.SwingHighs(bars, s.swingPeriod)
@@ -133,19 +133,6 @@ func (s *NYOpenRuleStrategy) precompute() {
 			dd.nyOpen = bar.Open
 			dd.hasNY = true
 		}
-
-		// Determine NY bias from early NY bars (07:00-08:00 EST)
-		if dd.hasNY && dd.hasLondon && dd.londonBias != 0 && dd.nyBias == 0 && h >= 7 && h < 8 {
-			if bar.Close > dd.nyOpen && dd.londonBias == 1 {
-				dd.nyBias = 1 // continuation
-			} else if bar.Close < dd.nyOpen && dd.londonBias == -1 {
-				dd.nyBias = 1 // continuation
-			} else if bar.Close < dd.nyOpen && dd.londonBias == 1 {
-				dd.nyBias = -1 // reversal
-			} else if bar.Close > dd.nyOpen && dd.londonBias == -1 {
-				dd.nyBias = -1 // reversal
-			}
-		}
 	}
 }
 
@@ -168,13 +155,44 @@ func (s *NYOpenRuleStrategy) Signal(i int) SignalType {
 
 	dateKey := s.tradingDateKey(bar.Time)
 	dd := s.dayData[dateKey]
-	if dd == nil || !dd.hasLondon || !dd.hasNY || dd.londonBias == 0 || dd.nyBias == 0 {
+	if dd == nil || !dd.hasLondon || !dd.hasNY || dd.londonBias == 0 {
+		return NoSignal
+	}
+
+	// Compute NY bias incrementally using only bars before the current bar (j < i)
+	// to avoid look-ahead bias. The precomputed nyBias field is no longer used.
+	nyBias := 0
+	for j := 0; j < i; j++ {
+		jt := s.bars[j].Time.In(s.est)
+		jh := jt.Hour()
+		jKey := s.tradingDateKey(s.bars[j].Time)
+		if jKey != dateKey {
+			continue
+		}
+		// Only consider early NY bars (07:00-08:00 EST)
+		if jh >= 7 && jh < 8 {
+			if s.bars[j].Close > dd.nyOpen && dd.londonBias == 1 {
+				nyBias = 1 // continuation
+				break
+			} else if s.bars[j].Close < dd.nyOpen && dd.londonBias == -1 {
+				nyBias = 1 // continuation
+				break
+			} else if s.bars[j].Close < dd.nyOpen && dd.londonBias == 1 {
+				nyBias = -1 // reversal
+				break
+			} else if s.bars[j].Close > dd.nyOpen && dd.londonBias == -1 {
+				nyBias = -1 // reversal
+				break
+			}
+		}
+	}
+	if nyBias == 0 {
 		return NoSignal
 	}
 
 	// Mode filtering: 0=reversal, 1=continuation, 2=both
-	isContinuation := dd.nyBias == 1
-	isReversal := dd.nyBias == -1
+	isContinuation := nyBias == 1
+	isReversal := nyBias == -1
 
 	if s.mode == 0 && !isReversal {
 		return NoSignal

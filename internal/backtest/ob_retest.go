@@ -102,8 +102,9 @@ func (s *OBRetestStrategy) Signal(i int) SignalType {
 			continue
 		}
 
-		// Check mitigation: if mitigated before current bar, skip
-		if ob.Mitigated && ob.MitIndex <= i {
+		// Check mitigation: skip only if mitigated before current bar.
+		// Do NOT check ob.Mitigated (precomputed over entire dataset = look-ahead bias).
+		if ob.MitIndex >= 0 && ob.MitIndex < i {
 			continue
 		}
 

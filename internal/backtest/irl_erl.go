@@ -86,7 +86,8 @@ func (s *IRLERLStrategy) Signal(i int) SignalType {
 			continue
 		}
 		// Must not be mitigated before current bar.
-		if zone.Mitigated && zone.MitIndex < i {
+		// Do NOT check zone.Mitigated (precomputed over entire dataset = look-ahead bias).
+		if zone.MitIndex >= 0 && zone.MitIndex < i {
 			continue
 		}
 		// Check if current bar touches the IRL zone.
@@ -101,6 +102,7 @@ func (s *IRLERLStrategy) Signal(i int) SignalType {
 				s.lastSigBar = i
 				return BuySignal
 			}
+			break // first matching zone wins; avoid conflicting signals from later zones
 		}
 
 		if zone.Direction == indicators.Bearish {
@@ -110,6 +112,7 @@ func (s *IRLERLStrategy) Signal(i int) SignalType {
 				s.lastSigBar = i
 				return SellSignal
 			}
+			break // first matching zone wins; avoid conflicting signals from later zones
 		}
 	}
 

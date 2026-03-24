@@ -9,7 +9,7 @@ import (
 // makeSBBars creates test bars with timestamps in a Silver Bullet window.
 // The bars simulate: range → swing low → sweep below → bullish displacement + FVG → retrace.
 func makeSBBars(baseHourEST int) []data.OHLCV {
-	est := time.FixedZone("EST", -5*3600)
+	est := estLoc
 	// Base time at the target hour
 	base := time.Date(2024, 6, 10, baseHourEST, 0, 0, 0, est)
 	minute := func(m int) time.Time { return base.Add(time.Duration(m) * time.Minute) }

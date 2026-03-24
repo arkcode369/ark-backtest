@@ -54,7 +54,7 @@ func (s *CBDRSTDStrategy) Init(bars []data.OHLCV, params map[string]float64) {
 	s.minSTD = getParam(params, "min_std", 1.0)
 	s.maxSTD = getParam(params, "max_std", 2.5)
 	s.lastSigBar = -10
-	s.est = time.FixedZone("EST", -5*3600)
+	s.est = estLoc
 
 	s.atr = indicators.ATR(bars, atrPeriod)
 	s.cbdrs = ComputeCBDR(bars)

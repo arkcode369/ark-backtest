@@ -64,7 +64,7 @@ func (s *FloutStrategy) Init(bars []data.OHLCV, params map[string]float64) {
 	s.maxSTD = getParam(params, "max_std", 2.5)
 	floutMode := int(getParam(params, "flout_mode", 0))
 	s.lastSigBar = -10
-	s.est = time.FixedZone("EST", -5*3600)
+	s.est = estLoc
 
 	s.atr = indicators.ATR(bars, atrPeriod)
 	s.flouts = s.computeFlout(bars, floutMode)
@@ -98,7 +98,7 @@ func (s *FloutStrategy) computeFlout(bars []data.OHLCV, mode int) []floutData {
 			d, exists := days[dateKey]
 			if !exists {
 				d = &dayRange{
-					date:      nextDay.Truncate(24 * time.Hour),
+					date:      time.Date(nextDay.Year(), nextDay.Month(), nextDay.Day(), 0, 0, 0, 0, estLoc),
 					cbdrHigh:  bar.High,
 					cbdrLow:   bar.Low,
 					asianHigh: -math.MaxFloat64,

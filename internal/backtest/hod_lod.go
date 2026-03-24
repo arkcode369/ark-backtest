@@ -63,7 +63,7 @@ func (s *HODLODStrategy) Init(bars []data.OHLCV, params map[string]float64) {
 	s.minSTD = getParam(params, "min_std", 1.0)
 	s.maxSTD = getParam(params, "max_std", 2.5)
 	s.lastSigBar = -10
-	s.est = time.FixedZone("EST", -5*3600)
+	s.est = estLoc
 
 	s.atr = indicators.ATR(bars, atrPeriod)
 	s.cbdrs = ComputeCBDR(bars)
@@ -90,8 +90,12 @@ func (s *HODLODStrategy) Signal(i int) SignalType {
 		return NoSignal
 	}
 
-	// Determine trading date
+	// Determine trading date (bars at 18:00+ EST belong to next day's session,
+	// matching the CBDR date convention)
 	dateKey := t.Format("2006-01-02")
+	if h >= 18 {
+		dateKey = t.Add(24 * time.Hour).Format("2006-01-02")
+	}
 
 	// Update running high/low for the day
 	if prev, ok := s.dayHighSeen[dateKey]; !ok || bar.High > prev {

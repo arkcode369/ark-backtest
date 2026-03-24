@@ -203,9 +203,9 @@ func detectOrderBlocks(bars []data.OHLCV, atr []float64, impulseMult float64) []
 			top := bars[i-1].Open
 			bottom := bars[i-1].Low
 			z := makePDZone(PDOrderBlock, Bullish, i, top, bottom)
-			// Mitigation: price trades through the OB
+			// Mitigation: price closes below the OB bottom
 			for j := i + 1; j < n; j++ {
-				if bars[j].Low <= z.Top {
+				if bars[j].Close < z.Bottom {
 					z.Mitigated = true
 					z.MitIndex = j
 					break
@@ -219,9 +219,9 @@ func detectOrderBlocks(bars []data.OHLCV, atr []float64, impulseMult float64) []
 			top := bars[i-1].High
 			bottom := bars[i-1].Open
 			z := makePDZone(PDOrderBlock, Bearish, i, top, bottom)
-			// Mitigation: price trades through the OB
+			// Mitigation: price closes above the OB top
 			for j := i + 1; j < n; j++ {
-				if bars[j].High >= z.Bottom {
+				if bars[j].Close > z.Top {
 					z.Mitigated = true
 					z.MitIndex = j
 					break
@@ -247,9 +247,9 @@ func detectBreakerBlocks(bars []data.OHLCV, orderBlocks []PDZone) []PDZone {
 			for j := ob.Index + 1; j < n; j++ {
 				if bars[j].Close > ob.Top {
 					z := makePDZone(PDBreakerBlock, Bullish, j, ob.Top, ob.Bottom)
-					// Check mitigation: price returns into breaker zone
+					// Check mitigation: price closes below breaker bottom
 					for k := j + 1; k < n; k++ {
-						if bars[k].Low <= z.Top {
+						if bars[k].Close < z.Bottom {
 							z.Mitigated = true
 							z.MitIndex = k
 							break
@@ -265,9 +265,9 @@ func detectBreakerBlocks(bars []data.OHLCV, orderBlocks []PDZone) []PDZone {
 			for j := ob.Index + 1; j < n; j++ {
 				if bars[j].Close < ob.Bottom {
 					z := makePDZone(PDBreakerBlock, Bearish, j, ob.Top, ob.Bottom)
-					// Check mitigation
+					// Check mitigation: price closes above breaker top
 					for k := j + 1; k < n; k++ {
-						if bars[k].High >= z.Bottom {
+						if bars[k].Close > z.Top {
 							z.Mitigated = true
 							z.MitIndex = k
 							break

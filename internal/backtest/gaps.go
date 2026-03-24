@@ -44,7 +44,8 @@ func DetectNDOG(bars []data.OHLCV) []OpeningGap {
 	var current *dayData
 
 	for _, bar := range bars {
-		dateKey := bar.Time.Truncate(24 * time.Hour)
+		estTime := bar.Time.In(estLoc)
+		dateKey := time.Date(estTime.Year(), estTime.Month(), estTime.Day(), 0, 0, 0, 0, estLoc)
 		if current == nil || !current.date.Equal(dateKey) {
 			if current != nil {
 				days = append(days, *current)
@@ -149,10 +150,12 @@ func DetectNWOG(bars []data.OHLCV) []OpeningGap {
 // FindGapForBar returns all gaps (NDOG/NWOG) that are relevant to the given bar's date.
 // A gap is relevant if the bar's date matches the gap's date.
 func FindGapForBar(gaps []OpeningGap, bar data.OHLCV) []OpeningGap {
-	barDate := bar.Time.Truncate(24 * time.Hour)
+	estTime := bar.Time.In(estLoc)
+	barDate := time.Date(estTime.Year(), estTime.Month(), estTime.Day(), 0, 0, 0, 0, estLoc)
 	var relevant []OpeningGap
 	for _, g := range gaps {
-		gapDate := g.Date.Truncate(24 * time.Hour)
+		gapEstTime := g.Date.In(estLoc)
+		gapDate := time.Date(gapEstTime.Year(), gapEstTime.Month(), gapEstTime.Day(), 0, 0, 0, 0, estLoc)
 		if gapDate.Equal(barDate) {
 			relevant = append(relevant, g)
 		}

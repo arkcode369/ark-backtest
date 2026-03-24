@@ -27,10 +27,8 @@ type SessionLabel struct {
 func LabelSessions(bars []data.OHLCV) []SessionLabel {
 	labels := make([]SessionLabel, len(bars))
 
-	est := time.FixedZone("EST", -5*3600)
-
 	for i, bar := range bars {
-		t := bar.Time.In(est)
+		t := bar.Time.In(estLoc)
 		h := t.Hour()
 		m := t.Minute()
 		totalMin := h*60 + m
@@ -78,8 +76,6 @@ type CBDRResult struct {
 // CBDR is defined as the Asian session range (18:00-00:00 EST).
 // ICT uses the CBDR range to project standard deviations for the next day's potential range.
 func ComputeCBDR(bars []data.OHLCV) []CBDRResult {
-	est := time.FixedZone("EST", -5*3600)
-
 	// Group bars by trading date and collect Asian session bars
 	type dayBars struct {
 		date       time.Time
@@ -92,7 +88,7 @@ func ComputeCBDR(bars []data.OHLCV) []CBDRResult {
 	var dayOrder []string
 
 	for _, bar := range bars {
-		t := bar.Time.In(est)
+		t := bar.Time.In(estLoc)
 		h := t.Hour()
 
 		// Asian session: 18:00-23:59 EST
@@ -104,7 +100,7 @@ func ComputeCBDR(bars []data.OHLCV) []CBDRResult {
 			d, exists := days[dateKey]
 			if !exists {
 				d = &dayBars{
-					date:      nextDay.Truncate(24 * time.Hour),
+					date:      time.Date(nextDay.Year(), nextDay.Month(), nextDay.Day(), 0, 0, 0, 0, estLoc),
 					asianHigh: bar.High,
 					asianLow:  bar.Low,
 					hasAsian:  true,
@@ -149,8 +145,7 @@ func ComputeCBDR(bars []data.OHLCV) []CBDRResult {
 // FindCBDRForBar returns the CBDR result applicable to the given bar's trading day.
 // Returns nil if no CBDR data is available for that day.
 func FindCBDRForBar(cbdrs []CBDRResult, bar data.OHLCV) *CBDRResult {
-	est := time.FixedZone("EST", -5*3600)
-	t := bar.Time.In(est)
+	t := bar.Time.In(estLoc)
 	// Determine trading date: if before midnight, it's the current date;
 	// if 18:00+ it's the next date's session
 	var dateKey string

@@ -55,7 +55,7 @@ func (s *SilverBulletStrategy) Init(bars []data.OHLCV, params map[string]float64
 		s.lookback = s.swingPeriod * 2
 	}
 	s.lastSigBar = -s.lookback
-	s.est = time.FixedZone("EST", -5*3600)
+	s.est = estLoc
 
 	s.atr = indicators.ATR(bars, atrPeriod)
 	s.swingHighs = indicators.SwingHighs(bars, s.swingPeriod)
@@ -124,7 +124,7 @@ func (s *SilverBulletStrategy) checkBullishSB(i int) bool {
 		}
 
 		// Find bullish FVG after the sweep
-		for d := sweepIdx; d < i-1; d++ {
+		for d := sweepIdx; d < i-2; d++ {
 			if d+2 >= len(bars) {
 				break
 			}
@@ -183,7 +183,7 @@ func (s *SilverBulletStrategy) checkBearishSB(i int) bool {
 		}
 
 		// Find bearish FVG after the sweep
-		for d := sweepIdx; d < i-1; d++ {
+		for d := sweepIdx; d < i-2; d++ {
 			if d+2 >= len(bars) {
 				break
 			}

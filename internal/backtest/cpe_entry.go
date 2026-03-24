@@ -45,11 +45,6 @@ type cpeDay struct {
 	nyOpen     float64
 	hasLondon  bool
 	hasNY      bool
-	// Track whether price displaced away from each open
-	londonDisplacedBelow bool
-	londonDisplacedAbove bool
-	nyDisplacedBelow     bool
-	nyDisplacedAbove     bool
 }
 
 func (s *CPEEntryStrategy) Name() string { return "CPE Entry" }
@@ -65,7 +60,7 @@ func (s *CPEEntryStrategy) Init(bars []data.OHLCV, params map[string]float64) {
 	s.bodyRatio = getParam(params, "body_ratio", 0.5)
 	s.proxATR = getParam(params, "proximity_atr", 0.5)
 	s.lastSigBar = -20
-	s.est = time.FixedZone("EST", -5*3600)
+	s.est = estLoc
 
 	s.atr = indicators.ATR(bars, atrPeriod)
 	s.swingHighs = indicators.SwingHighs(bars, s.swingPeriod)
@@ -107,26 +102,6 @@ func (s *CPEEntryStrategy) precomputeOpens() {
 			dd.nyOpen = bar.Open
 			dd.hasNY = true
 		}
-
-		// Track displacement away from London open
-		if dd.hasLondon && h >= 2 && h < 7 {
-			if bar.Low < dd.londonOpen {
-				dd.londonDisplacedBelow = true
-			}
-			if bar.High > dd.londonOpen {
-				dd.londonDisplacedAbove = true
-			}
-		}
-
-		// Track displacement away from NY open
-		if dd.hasNY && h >= 7 && h < 16 {
-			if bar.Low < dd.nyOpen {
-				dd.nyDisplacedBelow = true
-			}
-			if bar.High > dd.nyOpen {
-				dd.nyDisplacedAbove = true
-			}
-		}
 	}
 }
 
@@ -160,9 +135,41 @@ func (s *CPEEntryStrategy) Signal(i int) SignalType {
 
 	proxDist := s.proxATR * s.atr[i]
 
+	// Compute displacement flags incrementally using only bars up to index i
+	// to avoid look-ahead bias (previously these were precomputed using all bars).
+	londonDisplacedBelow := false
+	londonDisplacedAbove := false
+	nyDisplacedBelow := false
+	nyDisplacedAbove := false
+	dateKey := s.tradingDateKey(t)
+	for j := 0; j < i; j++ {
+		jt := s.bars[j].Time.In(s.est)
+		jh := jt.Hour()
+		jKey := s.tradingDateKey(jt)
+		if jKey != dateKey {
+			continue
+		}
+		if dd.hasLondon && jh >= 2 && jh < 7 {
+			if s.bars[j].Low < dd.londonOpen {
+				londonDisplacedBelow = true
+			}
+			if s.bars[j].High > dd.londonOpen {
+				londonDisplacedAbove = true
+			}
+		}
+		if dd.hasNY && jh >= 7 && jh < 16 {
+			if s.bars[j].Low < dd.nyOpen {
+				nyDisplacedBelow = true
+			}
+			if s.bars[j].High > dd.nyOpen {
+				nyDisplacedAbove = true
+			}
+		}
+	}
+
 	// Check NY open proximity entry (during NY session 07:00-16:00)
 	if dd.hasNY && h >= 7 && h < 16 {
-		sig := s.checkProximityEntry(i, dd.nyOpen, dd.nyDisplacedBelow, dd.nyDisplacedAbove, proxDist, rng)
+		sig := s.checkProximityEntry(i, dd.nyOpen, nyDisplacedBelow, nyDisplacedAbove, proxDist, rng)
 		if sig != NoSignal {
 			s.lastSigBar = i
 			return sig
@@ -171,7 +178,7 @@ func (s *CPEEntryStrategy) Signal(i int) SignalType {
 
 	// Check London open proximity entry (during London/early NY 02:00-10:00)
 	if dd.hasLondon && h >= 2 && h < 10 {
-		sig := s.checkProximityEntry(i, dd.londonOpen, dd.londonDisplacedBelow, dd.londonDisplacedAbove, proxDist, rng)
+		sig := s.checkProximityEntry(i, dd.londonOpen, londonDisplacedBelow, londonDisplacedAbove, proxDist, rng)
 		if sig != NoSignal {
 			s.lastSigBar = i
 			return sig

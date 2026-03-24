@@ -7,7 +7,7 @@ import (
 )
 
 func makeAMDBars() []data.OHLCV {
-	est := time.FixedZone("EST", -5*3600)
+	est := estLoc
 	bars := make([]data.OHLCV, 0)
 
 	// Asian session (18:00-23:59 EST previous day) — tight range

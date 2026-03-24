@@ -11,7 +11,7 @@ import (
 // ── Judas Swing Tests ──
 
 func TestDetectJudasSwings(t *testing.T) {
-	est := time.FixedZone("EST", -5*3600)
+	est := estLoc
 	bars := make([]data.OHLCV, 0)
 
 	// Previous session (London 02:00-04:59): range 99-101
