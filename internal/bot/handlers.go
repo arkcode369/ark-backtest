@@ -14,6 +14,7 @@ import (
 	"time"
 	"trading-backtest-bot/internal/backtest"
 	"trading-backtest-bot/internal/data"
+	"trading-backtest-bot/internal/pdarray"
 	"trading-backtest-bot/internal/strategy"
 
 	tgbotapi "github.com/go-telegram-bot-api/telegram-bot-api/v5"
@@ -193,6 +194,12 @@ func (b *Bot) handleMessage(msg *tgbotapi.Message) {
 		b.handleStrategyInfo(chatID, args)
 	case "list":
 		b.handleListFiles(chatID)
+	case "pdstat":
+		if !b.userLimiter.Allow(chatID, "backtest") {
+			b.send(chatID, "⏳ Please wait before making another request.")
+			return
+		}
+		b.handlePDStat(chatID, args)
 	default:
 		if cmd != "" {
 			b.send(chatID, "\u2753 Unknown command: /"+cmd+"\nUse /help for all available commands.")
@@ -211,6 +218,7 @@ func (b *Bot) sendStart(chatID int64) {
 		"• /strategies — browse all strategies\n" +
 		"• /si ict2022 — detailed strategy info & presets\n" +
 		"• /backtest XAUUSD 1d ema\\_cross — run a backtest\n" +
+		"• /pdstat XAUUSD 1d — PD Array success rate analysis\n" +
 		"• /strategy — start AI strategy builder\n" +
 		"• /help — full command reference"
 	b.sendMD(chatID, msg)
@@ -233,6 +241,11 @@ func (b *Bot) sendHelp(chatID int64) {
 		"  _Compare strategy across multiple symbols_\n" +
 		"`/optimize SYMBOL INTERVAL STRATEGY param=min:max:step`\n" +
 		"  _Example:_ `/optimize XAUUSD 1d ema_cross fast=5:20:1 slow=15:50:5`\n\n" +
+		"*📉 PD Array Analysis*\n" +
+		"`/pdstat SYMBOL INTERVAL [period=2y]` — success rate tiap PD array\n" +
+		"  _Example:_ `/pdstat XAUUSD 1d period=2y`\n" +
+		"  _Example:_ `/pdstat NQ 1h`\n" +
+		"  _Analyzes: FVG, OB, Breaker, Mitigation, Rejection, IFVG, BPR, VolImbalance_\n\n" +
 		"*🧠 Strategy Builder (AI)*\n" +
 		"`/strategy [topic]` — start AI strategy conversation\n" +
 		"`/endstrategy` — end session\n" +
@@ -1394,6 +1407,61 @@ func generateCombinations(ranges map[string][3]float64, defaults map[string]floa
 }
 
 // ── /list ─────────────────────────────────────────────────────────────────
+
+// ── /pdstat ───────────────────────────────────────────────────────────────
+
+func (b *Bot) handlePDStat(chatID int64, args string) {
+	if args == "" {
+		b.send(chatID, "Usage: /pdstat SYMBOL INTERVAL [period=2y]\nExample: /pdstat XAUUSD 1d period=2y\nExample: /pdstat NQ 1h")
+		return
+	}
+
+	parts := strings.Fields(args)
+	if len(parts) < 2 {
+		b.send(chatID, "❌ Need at least: SYMBOL INTERVAL\nExample: /pdstat XAUUSD 1d")
+		return
+	}
+
+	symbolKey := strings.ToUpper(parts[0])
+	interval := strings.ToLower(parts[1])
+
+	opts := parseOptions(parts[2:])
+	period := getOptStr(opts, "period", defaultPeriod(interval))
+
+	// Validate symbol
+	_, ok := data.GetSymbol(symbolKey)
+	if !ok {
+		b.send(chatID, fmt.Sprintf("❌ Unknown symbol: %s\nUse /symbols to see all supported instruments.", symbolKey))
+		return
+	}
+
+	// Validate interval
+	if _, ok := data.ValidIntervals[interval]; !ok {
+		b.send(chatID, fmt.Sprintf("❌ Unsupported interval: %s\nSupported: 1m, 5m, 15m, 30m, 1h, 1d, 1w", interval))
+		return
+	}
+
+	b.send(chatID, fmt.Sprintf("⏳ Fetching %s data (%s, %s) and analyzing PD Arrays...", symbolKey, interval, period))
+
+	bars, err := data.FetchOHLCV(b.ctx, data.FetchParams{
+		Symbol:   symbolKey,
+		Interval: interval,
+		Period:   period,
+	})
+	if err != nil {
+		b.send(chatID, fmt.Sprintf("❌ Data fetch error: %v", err))
+		return
+	}
+	if len(bars) < 20 {
+		b.send(chatID, fmt.Sprintf("❌ Not enough data: %d bars. Try a longer period or wider interval.", len(bars)))
+		return
+	}
+
+	b.send(chatID, fmt.Sprintf("🔍 Analyzing %d bars for PD Array patterns...", len(bars)))
+
+	result := pdarray.Analyze(bars, symbolKey, interval)
+	b.sendMD(chatID, pdarray.FormatResult(result))
+}
 
 func (b *Bot) handleListFiles(chatID int64) {
 	storageDir := os.Getenv("STORAGE_DIR")
