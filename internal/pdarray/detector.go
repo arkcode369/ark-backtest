@@ -878,45 +878,39 @@ func detectRDRB(bars []data.OHLCV, atr []float64) []PDZone {
 // maxTouches: max sentuhan per zona — setelah ini zona dianggap "habis".
 const maxTouches = 3
 
-// lookForwardBars returns how many bars forward a zone should be tracked,
-// calibrated so that every timeframe covers approximately the same real-time
-// window (≈ 2 trading weeks = ~10 trading days).
+// lookForwardBars returns how many bars forward a zone should be tracked.
 //
-// Rationale: a PD Array on 1m is irrelevant after a few hours; the same
-// concept on 1w stays relevant for months. We normalise to ~2 trading weeks
-// worth of bars so the Zone% metric is comparable across timeframes.
+// Window per timeframe (user-calibrated):
 //
-// Mapping (approximate trading hours per session = 7h, 5 days/week):
-//
-//	1m  → 700  bars  (~10 days × 70 bars/day)
-//	2m  → 350
-//	5m  → 140
-//	15m → 94   (≈ 100)
-//	30m → 47   (≈ 50)
-//	1h  → 70   (7h × 2 weeks = 70 bars)  [was 100 — now tighter]
-//	2h  → 35
-//	4h  → 25   (7h/4 × 10 days ≈ 18; round up to 25)
-//	1d  → 10   (2 trading weeks = 10 days)
-//	1w  → 8    (2 months ≈ 8 weeks)
-//	1mo → 3    (≈ 1 quarter)
+//	1m  → 15   bars  (15 menit)
+//	2m  → 8          (≈ 15 menit)
+//	5m  → 6          (30 menit)
+//	15m → 4          (1 jam)
+//	30m → 4          (2 jam)
+//	1h  → 12         (12 jam)
+//	2h  → 6          (12 jam)
+//	4h  → 42         (1 minggu = 7 hari × 6 bar/hari)
+//	1d  → 10         (2 minggu)
+//	1w  → 8          (2 bulan ≈ 8 minggu)
+//	1mo → 3          (1 kuartal)
 func lookForwardBars(interval string) int {
 	switch interval {
 	case "1m":
-		return 700
+		return 15
 	case "2m":
-		return 350
+		return 8
 	case "5m":
-		return 140
+		return 6
 	case "15m":
-		return 100
+		return 4
 	case "30m":
-		return 50
+		return 4
 	case "1h", "60m":
-		return 70
+		return 12
 	case "2h":
-		return 35
+		return 6
 	case "4h":
-		return 25
+		return 42
 	case "1d", "d":
 		return 10
 	case "1w", "w", "wk":
@@ -925,7 +919,7 @@ func lookForwardBars(interval string) int {
 		return 3
 	default:
 		// Fallback: assume 1h-equivalent
-		return 70
+		return 12
 	}
 }
 
