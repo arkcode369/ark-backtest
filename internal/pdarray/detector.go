@@ -112,6 +112,7 @@ type AnalyzeResult struct {
 	Symbol              string
 	Interval            string
 	Period              string
+	LookForward         int     // bars tracked per zone (timeframe-calibrated)
 	Stats               []Stats
 	Total               int
 	TotalTested         int
@@ -156,9 +157,10 @@ func Analyze(bars []data.OHLCV, symbol, interval string) *AnalyzeResult {
 	zones = append(zones, detectRDRB(bars, atr)...)
 
 	// ── Tracking phase ───────────────────────────────────────────────────────
-	trackZones(bars, zones)
+	lookFwd := lookForwardBars(interval)
+	trackZones(bars, zones, lookFwd)
 
-	return aggregateStats(zones, symbol, interval, bars)
+	return aggregateStats(zones, symbol, interval, lookFwd, bars)
 }
 
 // ── FVG ──────────────────────────────────────────────────────────────────────
@@ -873,28 +875,70 @@ func detectRDRB(bars []data.OHLCV, atr []float64) []PDZone {
 
 // ── Zone Tracking ─────────────────────────────────────────────────────────────
 
-// Tracking parameters — tuned to reflect realistic zone relevance windows.
-const (
-	// maxLookForward: how many bars after formation we track the zone.
-	// Beyond this the zone is considered "expired / no longer relevant".
-	// 100 bars on 1h ≈ 4 trading days. On 1d ≈ 5 months.
-	maxLookForward = 100
+// maxTouches: max sentuhan per zona — setelah ini zona dianggap "habis".
+const maxTouches = 3
 
-	// maxTouches: after this many touches we stop tracking the zone.
-	// ICT zones lose significance after repeated tests.
-	maxTouches = 3
-)
+// lookForwardBars returns how many bars forward a zone should be tracked,
+// calibrated so that every timeframe covers approximately the same real-time
+// window (≈ 2 trading weeks = ~10 trading days).
+//
+// Rationale: a PD Array on 1m is irrelevant after a few hours; the same
+// concept on 1w stays relevant for months. We normalise to ~2 trading weeks
+// worth of bars so the Zone% metric is comparable across timeframes.
+//
+// Mapping (approximate trading hours per session = 7h, 5 days/week):
+//
+//	1m  → 700  bars  (~10 days × 70 bars/day)
+//	2m  → 350
+//	5m  → 140
+//	15m → 94   (≈ 100)
+//	30m → 47   (≈ 50)
+//	1h  → 70   (7h × 2 weeks = 70 bars)  [was 100 — now tighter]
+//	2h  → 35
+//	4h  → 25   (7h/4 × 10 days ≈ 18; round up to 25)
+//	1d  → 10   (2 trading weeks = 10 days)
+//	1w  → 8    (2 months ≈ 8 weeks)
+//	1mo → 3    (≈ 1 quarter)
+func lookForwardBars(interval string) int {
+	switch interval {
+	case "1m":
+		return 700
+	case "2m":
+		return 350
+	case "5m":
+		return 140
+	case "15m":
+		return 100
+	case "30m":
+		return 50
+	case "1h", "60m":
+		return 70
+	case "2h":
+		return 35
+	case "4h":
+		return 25
+	case "1d", "d":
+		return 10
+	case "1w", "w", "wk":
+		return 8
+	case "1mo", "mo":
+		return 3
+	default:
+		// Fallback: assume 1h-equivalent
+		return 70
+	}
+}
 
 // trackZones implements a multiple-touch model with expiry limits:
 //
-//   For each zone we scan up to maxLookForward bars after formation.
-//   Each time price enters the zone we count a "touch" (max maxTouches).
-//   A touch resolves when price closes:
-//     - back outside the zone on the entry side → Respected touch (+1 Respected)
-//     - through the far boundary               → Breached (zone dead, stop)
-//   After maxTouches the zone is considered expired regardless of outcome.
-//   Zones never touched within maxLookForward bars are marked Untested.
-func trackZones(bars []data.OHLCV, zones []PDZone) {
+//	For each zone we scan up to lookForward bars after formation.
+//	Each time price enters the zone we count a "touch" (max maxTouches).
+//	A touch resolves when price closes:
+//	  - back outside the zone on the entry side → Respected touch (+1 Respected)
+//	  - through the far boundary               → Breached (zone dead, stop)
+//	After maxTouches the zone is considered expired regardless of outcome.
+//	Zones never touched within lookForward bars are marked Untested.
+func trackZones(bars []data.OHLCV, zones []PDZone, lookForward int) {
 	n := len(bars)
 	for i := range zones {
 		z := &zones[i]
@@ -903,7 +947,7 @@ func trackZones(bars []data.OHLCV, zones []PDZone) {
 		}
 
 		inTouch := false
-		endBar := z.BarIndex + 1 + maxLookForward
+		endBar := z.BarIndex + 1 + lookForward
 		if endBar > n {
 			endBar = n
 		}
@@ -995,7 +1039,7 @@ type statKey struct {
 	d Direction
 }
 
-func aggregateStats(zones []PDZone, symbol, interval string, bars []data.OHLCV) *AnalyzeResult {
+func aggregateStats(zones []PDZone, symbol, interval string, lookFwd int, bars []data.OHLCV) *AnalyzeResult {
 	sm := make(map[statKey]*Stats, len(orderedTypes))
 	for _, td := range orderedTypes {
 		k := statKey{td.t, td.d}
@@ -1067,6 +1111,7 @@ func aggregateStats(zones []PDZone, symbol, interval string, bars []data.OHLCV) 
 		Symbol:              symbol,
 		Interval:            interval,
 		Period:              period,
+		LookForward:         lookFwd,
 		Stats:               statsList,
 		Total:               total,
 		TotalTested:         totalTested,
@@ -1096,6 +1141,7 @@ func FormatResult(r *AnalyzeResult) string {
 	out := fmt.Sprintf("📊 *PD Array Success Rate*\n*%s | %s | %s*\n", r.Symbol, r.Interval, r.Period)
 	out += fmt.Sprintf("Zones: %d detected | %d tested (%.1f%%) | %d total touches\n",
 		r.Total, r.TotalTested, testedPct, r.TotalTouches)
+	out += fmt.Sprintf("_Tracking: %d bars forward | max %d touches per zone_\n", r.LookForward, maxTouches)
 	out += "_Zone% = zona yg tidak pernah ditembus | Touch% = tiap sentuhan_\n"
 
 	// Build quick lookup
