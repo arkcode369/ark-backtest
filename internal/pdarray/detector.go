@@ -49,36 +49,58 @@ type PDZone struct {
 	Top       float64
 	Bottom    float64
 	Mid       float64
-	BarIndex  int  // bar where zone was *formed* (or activated)
-	Respected bool // zone held — price bounced as expected
-	Breached  bool // zone failed — price closed through it
-	Tested    bool // zone was touched at least once after formation
+	BarIndex  int // bar where zone was *formed* (or activated)
+
+	// Multiple-touch tracking:
+	// A zone starts as "active". Each time price enters the zone we record
+	// a touch. A touch is Respected when price closes back inside/above(bull)
+	// or inside/below(bear) the zone without closing through the opposite side.
+	// A touch is Breached when price closes beyond the zone's far boundary.
+	// Once Breached the zone is invalidated — no further touches are counted.
+	Touches   int  // number of times price entered the zone
+	Respected int  // touches that ended with a bounce (respected)
+	Breached  bool // true once price closed fully through the zone
+	Tested    bool // zone was touched at least once
 }
 
 // ── Stats ────────────────────────────────────────────────────────────────────
 
 // Stats aggregates outcomes for one (Type, Direction) pair.
 type Stats struct {
-	Type      PDArrayType
-	Direction Direction
-	Total     int // zones detected
-	Respected int
-	Breached  int
-	Untested  int
+	Type          PDArrayType
+	Direction     Direction
+	Total         int // zones detected
+	ZonesRespected int // zones where at least one touch was respected and never breached
+	ZonesBreached  int // zones that were ultimately breached
+	ZonesUntested  int // zones never touched
+	TotalTouches   int // sum of all touches across all zones
+	RespectedTouches int // touches that ended as bounces
+	BreachedTouches  int // touches that ended as breach (= number of breached zones, 1 per zone)
 }
 
-func (s Stats) TestedCount() int { return s.Respected + s.Breached }
+// TestedZones returns zones that were touched at least once.
+func (s Stats) TestedZones() int { return s.ZonesRespected + s.ZonesBreached }
 
+// RespectedPct is the % of tested zones that were ultimately respected (never breached).
 func (s Stats) RespectedPct() float64 {
-	if t := s.TestedCount(); t > 0 {
-		return float64(s.Respected) / float64(t) * 100
+	if t := s.TestedZones(); t > 0 {
+		return float64(s.ZonesRespected) / float64(t) * 100
 	}
 	return 0
 }
 
+// BreachedPct is the % of tested zones that were ultimately breached.
 func (s Stats) BreachedPct() float64 {
-	if t := s.TestedCount(); t > 0 {
-		return float64(s.Breached) / float64(t) * 100
+	if t := s.TestedZones(); t > 0 {
+		return float64(s.ZonesBreached) / float64(t) * 100
+	}
+	return 0
+}
+
+// TouchRespectedPct is the % of individual touches (across all zones) that bounced.
+func (s Stats) TouchRespectedPct() float64 {
+	if s.TotalTouches > 0 {
+		return float64(s.RespectedTouches) / float64(s.TotalTouches) * 100
 	}
 	return 0
 }
@@ -93,7 +115,10 @@ type AnalyzeResult struct {
 	Stats               []Stats
 	Total               int
 	TotalTested         int
-	OverallRespectedPct float64
+	TotalTouches        int
+	RespectedTouches    int
+	OverallRespectedPct float64 // % of tested zones never breached
+	OverallTouchPct     float64 // % of individual touches that bounced
 }
 
 // ── Public Entry Point ────────────────────────────────────────────────────────
@@ -412,43 +437,156 @@ func detectBPRs(bars []data.OHLCV, bullFVGs, bearFVGs []PDZone) []PDZone {
 
 // ── Premium / Discount ────────────────────────────────────────────────────────
 
-// detectPremiumDiscount creates periodic Premium (bearish) and Discount (bullish)
-// zones from the 20-bar swing range. A new set of zones is emitted every 20 bars
-// whenever the swing range is valid and non-trivial.
+// detectPremiumDiscount uses real swing high/low detection to create Premium
+// (bearish) and Discount (bullish) zones.
+//
+// Logic:
+//  1. Detect confirmed swing highs and swing lows using a left+right window of
+//     swingLook bars on each side.
+//  2. Pair each swing high with the most recent preceding swing low (or vice versa)
+//     to define a range.
+//  3. Also detect consolidation: when ATR is contracting (current ATR < avg ATR * 0.6)
+//     the range of that consolidation itself becomes the premium/discount zone.
+//  4. Equilibrium = midpoint of the range. Below = Discount (bullish), above = Premium (bearish).
 func detectPremiumDiscount(bars []data.OHLCV, atr []float64) []PDZone {
 	var out []PDZone
-	const window = 20
+	n := len(bars)
+	const swingLook = 5 // bars on each side to confirm swing
 
-	for i := window; i < len(bars); i += window {
-		swingHigh := bars[i-window].High
-		swingLow := bars[i-window].Low
-		for j := i - window + 1; j < i; j++ {
-			if bars[j].High > swingHigh {
-				swingHigh = bars[j].High
-			}
-			if bars[j].Low < swingLow {
-				swingLow = bars[j].Low
-			}
-		}
-		rng := swingHigh - swingLow
-		if math.IsNaN(rng) || rng <= 0 {
-			continue
-		}
-		// Require the range to be meaningful relative to ATR
-		if !math.IsNaN(atr[i]) && atr[i] > 0 && rng < atr[i]*0.5 {
-			continue
-		}
-		equil := (swingHigh + swingLow) / 2
+	// ── Step 1: collect swing highs and lows ──────────────────────────────────
+	type swingPoint struct {
+		idx   int
+		price float64
+		kind  string // "high" or "low"
+	}
+	var swings []swingPoint
 
-		// Discount zone (bullish): below equilibrium
-		if isValidZone(equil, swingLow) {
-			out = append(out, zone(TypePremDiscount, Bullish, equil, swingLow, i))
+	for i := swingLook; i < n-swingLook; i++ {
+		isHigh := true
+		isLow := true
+		for j := i - swingLook; j <= i+swingLook; j++ {
+			if j == i {
+				continue
+			}
+			if bars[j].High >= bars[i].High {
+				isHigh = false
+			}
+			if bars[j].Low <= bars[i].Low {
+				isLow = false
+			}
 		}
-		// Premium zone (bearish): above equilibrium
-		if isValidZone(swingHigh, equil) {
-			out = append(out, zone(TypePremDiscount, Bearish, swingHigh, equil, i))
+		if isHigh {
+			swings = append(swings, swingPoint{i, bars[i].High, "high"})
+		}
+		if isLow {
+			swings = append(swings, swingPoint{i, bars[i].Low, "low"})
 		}
 	}
+
+	// ── Step 2: pair consecutive swing high + swing low to build ranges ────────
+	// Walk through swings in order, keep last seen high and last seen low.
+	lastHighIdx, lastLowIdx := -1, -1
+	lastHighPrice, lastLowPrice := 0.0, 0.0
+
+	for _, sw := range swings {
+		if sw.kind == "high" {
+			if lastLowIdx >= 0 {
+				// We have a swing low before this swing high → valid range
+				swHigh := sw.price
+				swLow := lastLowPrice
+				rng := swHigh - swLow
+				if !math.IsNaN(rng) && rng > 0 {
+					atrVal := atr[sw.idx]
+					if math.IsNaN(atrVal) || atrVal == 0 || rng >= atrVal*1.0 {
+						equil := (swHigh + swLow) / 2
+						barIdx := sw.idx
+						if isValidZone(equil, swLow) {
+							out = append(out, zone(TypePremDiscount, Bullish, equil, swLow, barIdx))
+						}
+						if isValidZone(swHigh, equil) {
+							out = append(out, zone(TypePremDiscount, Bearish, swHigh, equil, barIdx))
+						}
+					}
+				}
+			}
+			lastHighIdx = sw.idx
+			lastHighPrice = sw.price
+		} else {
+			if lastHighIdx >= 0 {
+				// We have a swing high before this swing low → valid range
+				swHigh := lastHighPrice
+				swLow := sw.price
+				rng := swHigh - swLow
+				if !math.IsNaN(rng) && rng > 0 {
+					atrVal := atr[sw.idx]
+					if math.IsNaN(atrVal) || atrVal == 0 || rng >= atrVal*1.0 {
+						equil := (swHigh + swLow) / 2
+						barIdx := sw.idx
+						if isValidZone(equil, swLow) {
+							out = append(out, zone(TypePremDiscount, Bullish, equil, swLow, barIdx))
+						}
+						if isValidZone(swHigh, equil) {
+							out = append(out, zone(TypePremDiscount, Bearish, swHigh, equil, barIdx))
+						}
+					}
+				}
+			}
+			lastLowIdx = sw.idx
+			lastLowPrice = sw.price
+		}
+	}
+	_ = lastHighIdx
+	_ = lastLowIdx
+
+	// ── Step 3: consolidation ranges ─────────────────────────────────────────
+	// When ATR contracts below 60% of its 20-bar average, price is consolidating.
+	// The H-L range of that consolidation period = its own premium/discount zone.
+	const consolWindow = 20
+	for i := consolWindow; i < n; i++ {
+		if math.IsNaN(atr[i]) || atr[i] == 0 {
+			continue
+		}
+		// Compute avg ATR over consolWindow bars
+		avgATR := 0.0
+		for j := i - consolWindow; j < i; j++ {
+			if !math.IsNaN(atr[j]) {
+				avgATR += atr[j]
+			}
+		}
+		avgATR /= float64(consolWindow)
+		if avgATR == 0 {
+			continue
+		}
+
+		// Consolidation: current ATR is significantly contracted
+		if atr[i] > avgATR*0.6 {
+			continue // not consolidating
+		}
+
+		// Find H-L of consolidation window
+		swH := bars[i-consolWindow].High
+		swL := bars[i-consolWindow].Low
+		for j := i - consolWindow + 1; j <= i; j++ {
+			if bars[j].High > swH {
+				swH = bars[j].High
+			}
+			if bars[j].Low < swL {
+				swL = bars[j].Low
+			}
+		}
+		rng := swH - swL
+		if rng <= 0 || math.IsNaN(rng) {
+			continue
+		}
+		equil := (swH + swL) / 2
+		if isValidZone(equil, swL) {
+			out = append(out, zone(TypePremDiscount, Bullish, equil, swL, i))
+		}
+		if isValidZone(swH, equil) {
+			out = append(out, zone(TypePremDiscount, Bearish, swH, equil, i))
+		}
+	}
+
 	return out
 }
 
@@ -676,8 +814,20 @@ func detectRDRB(bars []data.OHLCV, atr []float64) []PDZone {
 
 // ── Zone Tracking ─────────────────────────────────────────────────────────────
 
-// trackZones iterates the bars after each zone's formation bar and determines
-// if the zone was respected (bounce) or breached (close through).
+// trackZones implements a multiple-touch model:
+//
+//   For each zone we scan every bar after formation. When price enters the zone
+//   we start a "touch". The touch resolves when price closes:
+//     - back outside the zone on the entry side  → Respected touch
+//     - through the far boundary of the zone     → Breached (zone invalidated)
+//
+//   Multiple respected touches are possible. The zone is only marked Breached
+//   once a close punches completely through it. After that, the zone is dead
+//   and no further touches are counted.
+//
+//   "Inside zone" state is tracked with a simple flag so that a bar that opens
+//   outside and closes inside (partial entry) counts as "still inside" until
+//   it resolves.
 func trackZones(bars []data.OHLCV, zones []PDZone) {
 	n := len(bars)
 	for i := range zones {
@@ -686,27 +836,56 @@ func trackZones(bars []data.OHLCV, zones []PDZone) {
 			continue
 		}
 
+		inTouch := false // currently inside the zone (touch in progress)
+
 		for k := z.BarIndex + 1; k < n; k++ {
 			bar := bars[k]
+
 			if z.Direction == Bullish {
-				if bar.Low <= z.Top {
+				// ── price enters zone when bar's low reaches or pierces zone top ──
+				if !inTouch && bar.Low <= z.Top {
+					inTouch = true
 					z.Tested = true
-					if bar.Close >= z.Bottom {
-						z.Respected = true
-					} else {
-						z.Breached = true
-					}
-					break
+					z.Touches++
 				}
-			} else {
-				if bar.High >= z.Bottom {
-					z.Tested = true
-					if bar.Close <= z.Top {
-						z.Respected = true
-					} else {
+
+				if inTouch {
+					if bar.Close < z.Bottom {
+						// Close below zone bottom → BREACHED, zone is dead
 						z.Breached = true
+						inTouch = false
+						break
 					}
-					break
+					if bar.Close > z.Top {
+						// Close back above zone top → touch RESPECTED, zone still active
+						z.Respected++
+						inTouch = false
+						// zone remains active for future touches
+					}
+					// close inside zone → still in touch, wait for next bar
+				}
+
+			} else { // Bearish
+				// ── price enters zone when bar's high reaches or pierces zone bottom ──
+				if !inTouch && bar.High >= z.Bottom {
+					inTouch = true
+					z.Tested = true
+					z.Touches++
+				}
+
+				if inTouch {
+					if bar.Close > z.Top {
+						// Close above zone top → BREACHED, zone is dead
+						z.Breached = true
+						inTouch = false
+						break
+					}
+					if bar.Close < z.Bottom {
+						// Close back below zone bottom → touch RESPECTED
+						z.Respected++
+						inTouch = false
+					}
+					// close inside zone → still in touch
 				}
 			}
 		}
@@ -759,13 +938,19 @@ func aggregateStats(zones []PDZone, symbol, interval string, bars []data.OHLCV) 
 			continue
 		}
 		s.Total++
+		s.TotalTouches += z.Touches
+		s.RespectedTouches += z.Respected
+
 		switch {
-		case z.Respected:
-			s.Respected++
+		case !z.Tested:
+			s.ZonesUntested++
 		case z.Breached:
-			s.Breached++
+			// Zone was ultimately breached (may have had respected touches before)
+			s.ZonesBreached++
+			s.BreachedTouches++
 		default:
-			s.Untested++
+			// Tested but never breached → zone respected overall
+			s.ZonesRespected++
 		}
 	}
 
@@ -775,20 +960,29 @@ func aggregateStats(zones []PDZone, symbol, interval string, bars []data.OHLCV) 
 	}
 
 	total := len(zones)
-	totalTested, totalRespected := 0, 0
+	totalTested, totalZonesRespected, totalTouches, totalRespectedTouches := 0, 0, 0, 0
 	for _, z := range zones {
+		totalTouches += z.Touches
+		totalRespectedTouches += z.Respected
 		if z.Tested {
 			totalTested++
-			if z.Respected {
-				totalRespected++
+			if !z.Breached {
+				totalZonesRespected++
 			}
 		}
 	}
 
+	// Overall: % of tested zones never breached
 	overallPct := 0.0
 	if totalTested > 0 {
-		overallPct = float64(totalRespected) / float64(totalTested) * 100
+		overallPct = float64(totalZonesRespected) / float64(totalTested) * 100
 	}
+	// Overall touch-level respect rate
+	overallTouchPct := 0.0
+	if totalTouches > 0 {
+		overallTouchPct = float64(totalRespectedTouches) / float64(totalTouches) * 100
+	}
+	_ = overallTouchPct // used in formatting
 
 	period := ""
 	if len(bars) >= 2 {
@@ -805,7 +999,10 @@ func aggregateStats(zones []PDZone, symbol, interval string, bars []data.OHLCV) 
 		Stats:               statsList,
 		Total:               total,
 		TotalTested:         totalTested,
+		TotalTouches:        totalTouches,
+		RespectedTouches:    totalRespectedTouches,
 		OverallRespectedPct: overallPct,
+		OverallTouchPct:     overallTouchPct,
 	}
 }
 
@@ -825,10 +1022,10 @@ func FormatResult(r *AnalyzeResult) string {
 		testedPct = float64(r.TotalTested) / float64(r.Total) * 100
 	}
 
-	out := fmt.Sprintf("📊 *PD Array Success Rate*\n*%s | %s | %s*\nZones: %d detected | %d tested (%.1f%%)\n",
-		r.Symbol, r.Interval, r.Period,
-		r.Total, r.TotalTested, testedPct,
-	)
+	out := fmt.Sprintf("📊 *PD Array Success Rate*\n*%s | %s | %s*\n", r.Symbol, r.Interval, r.Period)
+	out += fmt.Sprintf("Zones: %d detected | %d tested (%.1f%%) | %d total touches\n",
+		r.Total, r.TotalTested, testedPct, r.TotalTouches)
+	out += "_Zone% = zona yg tidak pernah ditembus | Touch% = tiap sentuhan_\n"
 
 	// Build quick lookup
 	sm := make(map[statKey]Stats)
@@ -853,28 +1050,33 @@ func FormatResult(r *AnalyzeResult) string {
 
 	// ── Overall ──────────────────────────────────────────────────────────────
 	out += "\n━━━ *OVERALL* ━━━\n"
-	overallBreached := 100.0 - r.OverallRespectedPct
-	out += fmt.Sprintf("✅ Respected: %.1f%% | ❌ Breached: %.1f%%\n", r.OverallRespectedPct, overallBreached)
+	out += fmt.Sprintf("Zone: ✅%.1f%% respected | ❌%.1f%% breached\n",
+		r.OverallRespectedPct, 100.0-r.OverallRespectedPct)
+	out += fmt.Sprintf("Touch: ✅%.1f%% bounce | ❌%.1f%% thru (%d/%d touches)\n",
+		r.OverallTouchPct, 100.0-r.OverallTouchPct,
+		r.RespectedTouches, r.TotalTouches)
 
 	best, worst := findBestWorst(r.Stats)
-	if best.TestedCount() >= 3 {
-		out += fmt.Sprintf("🏆 Best: %s %s (%.1f%%)\n", best.Direction, best.Type, best.RespectedPct())
+	if best.TestedZones() >= 3 {
+		out += fmt.Sprintf("🏆 Best Zone: %s %s (%.1f%% | touch %.1f%%)\n",
+			best.Direction, best.Type, best.RespectedPct(), best.TouchRespectedPct())
 	}
-	if worst.TestedCount() >= 3 {
-		out += fmt.Sprintf("⚠️  Weakest: %s %s (%.1f%%)\n", worst.Direction, worst.Type, worst.RespectedPct())
+	if worst.TestedZones() >= 3 {
+		out += fmt.Sprintf("⚠️  Weakest: %s %s (%.1f%% | touch %.1f%%)\n",
+			worst.Direction, worst.Type, worst.RespectedPct(), worst.TouchRespectedPct())
 	}
 
 	return out
 }
 
 // formatGroupTable renders a two-column (Bull | Bear) table for a set of types.
+// Each cell shows: zone% (zones respected/tested) and touch% (touches bounced/total)
 func formatGroupTable(sm map[statKey]Stats, types []PDArrayType) string {
-	// Header
-	out := fmt.Sprintf("%-12s  %-22s %-22s\n", "", "Bullish", "Bearish")
+	out := fmt.Sprintf("%-12s  %-26s %-26s\n", "", "Bullish", "Bearish")
 	for _, t := range types {
 		bull := sm[statKey{t, Bullish}]
 		bear := sm[statKey{t, Bearish}]
-		out += fmt.Sprintf("%-12s  %-22s %-22s\n",
+		out += fmt.Sprintf("%-12s  %-26s %-26s\n",
 			string(t),
 			formatCell(bull),
 			formatCell(bear),
@@ -883,21 +1085,30 @@ func formatGroupTable(sm map[statKey]Stats, types []PDArrayType) string {
 	return out
 }
 
+// formatCell shows zone-level AND touch-level stats:
+// ✅Z:67% T:72% (5z/7 | 9t/13)
+// Z = zone respected%, T = touch respected%
+// 5z/7 = 5 zones respected out of 7 tested
+// 9t/13 = 9 bounced touches out of 13 total touches
 func formatCell(s Stats) string {
 	if s.Total == 0 {
 		return "— (0 detected)"
 	}
-	tc := s.TestedCount()
-	if tc == 0 {
+	tz := s.TestedZones()
+	if tz == 0 {
 		return fmt.Sprintf("— (%d untested)", s.Total)
 	}
-	return fmt.Sprintf("✅%.1f%% (%d/%d)", s.RespectedPct(), tc, s.Total)
+	return fmt.Sprintf("Z:%.0f%% T:%.0f%% (%dz/%d|%dt/%d)",
+		s.RespectedPct(), s.TouchRespectedPct(),
+		s.ZonesRespected, tz,
+		s.RespectedTouches, s.TotalTouches,
+	)
 }
 
 func findBestWorst(stats []Stats) (best, worst Stats) {
 	initialized := false
 	for _, s := range stats {
-		if s.TestedCount() < 3 {
+		if s.TestedZones() < 3 {
 			continue
 		}
 		if !initialized {
