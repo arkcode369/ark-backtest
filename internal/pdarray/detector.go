@@ -1,5 +1,5 @@
 // Package pdarray provides detection and statistical tracking of ICT PD Array zones.
-// It identifies 15 zone types across Bullish/Bearish directions, then measures
+// It identifies 25 zone types across Bullish/Bearish directions, then measures
 // whether each zone was subsequently "respected" (price bounced) or "breached"
 // (price closed through the zone).
 package pdarray
@@ -7,6 +7,7 @@ package pdarray
 import (
 	"fmt"
 	"math"
+	"time"
 	"trading-backtest-bot/internal/data"
 	"trading-backtest-bot/internal/indicators"
 )
@@ -32,6 +33,30 @@ const (
 	TypeReclaimedOB     PDArrayType = "ReclaimedOB"
 	TypeBreakawayGap    PDArrayType = "BreakawayGap"
 	TypeRDRB            PDArrayType = "RDRB"
+
+	// ── ICT Liquidity Types ──────────────────────────────────────────────────
+	// BSL/SSL: Buy/Sell Side Liquidity pools sitting above swing highs / below swing lows
+	TypeBSL PDArrayType = "BSL"
+	TypeSSL PDArrayType = "SSL"
+
+	// LiqSweep: stop-hunt spike that immediately reverses back inside range
+	// LiqRun:   breakout that closes through the level and continues
+	TypeLiqSweep PDArrayType = "LiqSweep"
+	TypeLiqRun   PDArrayType = "LiqRun"
+
+	// LiqVoid: large-body displacement candle leaving a liquidity void
+	TypeLiqVoid PDArrayType = "LiqVoid"
+
+	// IRL/ERL: Internal / External Range Liquidity
+	TypeIRL PDArrayType = "IRL"
+	TypeERL PDArrayType = "ERL"
+
+	// OpenFloat: institutional liquidity pools at 20/40/60-bar highs & lows
+	TypeOpenFloat PDArrayType = "OpenFloat"
+
+	// NWOG/NDOG: New Week / New Day Opening Gap
+	TypeNWOG PDArrayType = "NWOG"
+	TypeNDOG PDArrayType = "NDOG"
 )
 
 // Direction is the bias of a PD Array zone.
@@ -155,6 +180,14 @@ func Analyze(bars []data.OHLCV, symbol, interval string) *AnalyzeResult {
 	zones = append(zones, detectReclaimedOBs(bars, bullOBs, bearOBs)...)
 	zones = append(zones, detectBreakawayGaps(bars, atr)...)
 	zones = append(zones, detectRDRB(bars, atr)...)
+
+	// ── ICT Liquidity detectors ──────────────────────────────────────────────
+	zones = append(zones, detectBSLSSL(bars, atr)...)
+	zones = append(zones, detectLiquiditySweepRun(bars, atr)...)
+	zones = append(zones, detectLiquidityVoid(bars, atr)...)
+	zones = append(zones, detectIRLERL(bars)...)
+	zones = append(zones, detectOpenFloat(bars, atr)...)
+	zones = append(zones, detectNWOGNDOG(bars, atr, interval)...)
 
 	// ── Tracking phase ───────────────────────────────────────────────────────
 	lookFwd := lookForwardBars(interval)
@@ -873,6 +906,523 @@ func detectRDRB(bars []data.OHLCV, atr []float64) []PDZone {
 	return out
 }
 
+// ── BSL / SSL (Buy Side & Sell Side Liquidity) ────────────────────────────────
+
+// detectBSLSSL identifies liquidity pools sitting above swing highs (BSL) and
+// below swing lows (SSL). BSL zones are Bearish (institution will sell into them);
+// SSL zones are Bullish (institution will buy from them).
+//
+// Equal Highs/Lows: when 2+ bars share a high/low within ATR*0.1 tolerance the
+// pool is considered stronger; this is encoded in Mid (pool count, not price midpoint).
+func detectBSLSSL(bars []data.OHLCV, atr []float64) []PDZone {
+	var out []PDZone
+	n := len(bars)
+	const swingLen = 10 // bars on each side to confirm swing
+	const thinMargin = 0.001 // minimum zone height as fraction of price
+
+	for i := swingLen; i < n-swingLen; i++ {
+		atrVal := atr[i]
+		if math.IsNaN(atrVal) || atrVal == 0 {
+			continue
+		}
+		tolerance := atrVal * 0.1
+
+		// ── Swing High → BSL pool above ──────────────────────────────────────
+		isHigh := true
+		for j := i - swingLen; j <= i+swingLen; j++ {
+			if j != i && bars[j].High >= bars[i].High {
+				isHigh = false
+				break
+			}
+		}
+		if isHigh {
+			swHigh := bars[i].High
+			zoneTop := swHigh + atrVal*0.1
+			zoneBot := swHigh - atrVal*0.05
+			if zoneBot <= 0 {
+				zoneBot = swHigh * (1 - thinMargin)
+			}
+			if isValidZone(zoneTop, zoneBot) {
+				// Count equal highs for pool strength
+				poolCount := 1.0
+				for k := i - swingLen; k <= i+swingLen; k++ {
+					if k != i && math.Abs(bars[k].High-swHigh) <= tolerance {
+						poolCount++
+					}
+				}
+				z := zone(TypeBSL, Bearish, zoneTop, zoneBot, i)
+				z.Mid = poolCount // encode pool strength
+				out = append(out, z)
+			}
+		}
+
+		// ── Swing Low → SSL pool below ────────────────────────────────────────
+		isLow := true
+		for j := i - swingLen; j <= i+swingLen; j++ {
+			if j != i && bars[j].Low <= bars[i].Low {
+				isLow = false
+				break
+			}
+		}
+		if isLow {
+			swLow := bars[i].Low
+			zoneTop := swLow + atrVal*0.05
+			zoneBot := swLow - atrVal*0.1
+			if zoneBot <= 0 {
+				zoneBot = swLow * (1 - thinMargin)
+			}
+			if isValidZone(zoneTop, zoneBot) {
+				poolCount := 1.0
+				for k := i - swingLen; k <= i+swingLen; k++ {
+					if k != i && math.Abs(bars[k].Low-swLow) <= tolerance {
+						poolCount++
+					}
+				}
+				z := zone(TypeSSL, Bullish, zoneTop, zoneBot, i)
+				z.Mid = poolCount
+				out = append(out, z)
+			}
+		}
+	}
+	return out
+}
+
+// ── Liquidity Sweep & Liquidity Run ───────────────────────────────────────────
+
+// detectLiquiditySweepRun identifies:
+//   - LiqSweep: spike through a swing level that closes back inside range
+//     (stop-hunt / reversal signal)
+//   - LiqRun: close that stays through the level (continuation / trend move)
+//
+// Direction convention:
+//   - SSL Sweep (low sweeps swing low, close back above) → Bullish
+//   - BSL Sweep (high sweeps swing high, close back below) → Bearish
+//   - BSL Run (close above swing high) → Bullish
+//   - SSL Run (close below swing low) → Bearish
+func detectLiquiditySweepRun(bars []data.OHLCV, atr []float64) []PDZone {
+	var out []PDZone
+	n := len(bars)
+	const swingLen = 10
+
+	for i := swingLen; i < n-swingLen; i++ {
+		atrVal := atr[i]
+		if math.IsNaN(atrVal) || atrVal == 0 {
+			continue
+		}
+
+		// Collect the most recent confirmed swing high before bar i
+		swingHigh := math.NaN()
+		for j := i - 1; j >= swingLen; j-- {
+			isH := true
+			for k := j - swingLen; k <= j+swingLen && k < n; k++ {
+				if k != j && bars[k].High >= bars[j].High {
+					isH = false
+					break
+				}
+			}
+			if isH {
+				swingHigh = bars[j].High
+				break
+			}
+		}
+
+		// Collect the most recent confirmed swing low before bar i
+		swingLow := math.NaN()
+		for j := i - 1; j >= swingLen; j-- {
+			isL := true
+			for k := j - swingLen; k <= j+swingLen && k < n; k++ {
+				if k != j && bars[k].Low <= bars[j].Low {
+					isL = false
+					break
+				}
+			}
+			if isL {
+				swingLow = bars[j].Low
+				break
+			}
+		}
+
+		bar := bars[i]
+
+		// ── BSL Sweep: high above swing high, close back below it ────────────
+		if !math.IsNaN(swingHigh) {
+			if bar.High > swingHigh && bar.Close < swingHigh {
+				// Thin zone: the wick area between swing high and bar high
+				top := bar.High
+				bot := swingHigh
+				if isValidZone(top, bot) {
+					out = append(out, zone(TypeLiqSweep, Bearish, top, bot, i))
+				} else {
+					// Ensure minimum zone height
+					out = append(out, zone(TypeLiqSweep, Bearish, swingHigh+atrVal*0.05, swingHigh-atrVal*0.02, i))
+				}
+			}
+			// BSL Run: close above swing high (continuation bullish)
+			if bar.Close > swingHigh {
+				top := bar.Close
+				bot := swingHigh
+				if !isValidZone(top, bot) {
+					bot = swingHigh - atrVal*0.02
+				}
+				if isValidZone(top, bot) {
+					out = append(out, zone(TypeLiqRun, Bullish, top, bot, i))
+				}
+			}
+		}
+
+		// ── SSL Sweep: low below swing low, close back above it ──────────────
+		if !math.IsNaN(swingLow) {
+			if bar.Low < swingLow && bar.Close > swingLow {
+				// Thin zone: wick area below swing low
+				top := swingLow
+				bot := bar.Low
+				if isValidZone(top, bot) {
+					out = append(out, zone(TypeLiqSweep, Bullish, top, bot, i))
+				} else {
+					out = append(out, zone(TypeLiqSweep, Bullish, swingLow+atrVal*0.02, swingLow-atrVal*0.05, i))
+				}
+			}
+			// SSL Run: close below swing low (continuation bearish)
+			if bar.Close < swingLow {
+				top := swingLow
+				bot := bar.Close
+				if !isValidZone(top, bot) {
+					top = swingLow + atrVal*0.02
+				}
+				if isValidZone(top, bot) {
+					out = append(out, zone(TypeLiqRun, Bearish, top, bot, i))
+				}
+			}
+		}
+	}
+	return out
+}
+
+// ── Liquidity Void ────────────────────────────────────────────────────────────
+
+// detectLiquidityVoid finds displacement candles where:
+//   - candle range > ATR * 2.0  AND
+//   - body > range * 0.7
+//
+// The void zone is the body of the candle (min(open,close) .. max(open,close)).
+// Direction: Bullish = close > open, Bearish = open > close.
+func detectLiquidityVoid(bars []data.OHLCV, atr []float64) []PDZone {
+	var out []PDZone
+	for i := 0; i < len(bars); i++ {
+		atrVal := atr[i]
+		if math.IsNaN(atrVal) || atrVal == 0 {
+			continue
+		}
+		candle := bars[i].High - bars[i].Low
+		if candle <= 0 {
+			continue
+		}
+		if candle <= atrVal*2.0 {
+			continue
+		}
+		body := math.Abs(bars[i].Close - bars[i].Open)
+		if body <= candle*0.7 {
+			continue
+		}
+
+		top := math.Max(bars[i].Open, bars[i].Close)
+		bot := math.Min(bars[i].Open, bars[i].Close)
+		if !isValidZone(top, bot) {
+			continue
+		}
+
+		dir := Bullish
+		if bars[i].Open > bars[i].Close {
+			dir = Bearish
+		}
+		out = append(out, zone(TypeLiqVoid, dir, top, bot, i))
+	}
+	return out
+}
+
+// ── IRL / ERL (Internal / External Range Liquidity) ───────────────────────────
+
+// detectIRLERL computes:
+//   - IRL (Internal Range Liquidity): equilibrium zones inside the current
+//     20-bar trading range (discount half = Bullish, premium half = Bearish)
+//   - ERL (External Range Liquidity): the 40-bar swing high/low levels that
+//     price is targeting outside the inner range. When price reaches an ERL
+//     the zone is confirmed (Bullish = ERL high touched, Bearish = ERL low touched).
+func detectIRLERL(bars []data.OHLCV) []PDZone {
+	var out []PDZone
+	n := len(bars)
+	const swingLen = 20
+
+	for i := swingLen * 2; i < n; i++ {
+		// ── Inner range (IRL) ─────────────────────────────────────────────────
+		innerHigh := bars[i-swingLen].High
+		innerLow := bars[i-swingLen].Low
+		for j := i - swingLen + 1; j <= i; j++ {
+			if bars[j].High > innerHigh {
+				innerHigh = bars[j].High
+			}
+			if bars[j].Low < innerLow {
+				innerLow = bars[j].Low
+			}
+		}
+		innerRng := innerHigh - innerLow
+		if innerRng <= 0 {
+			continue
+		}
+		equil := (innerHigh + innerLow) / 2
+
+		// Only emit IRL zones when price is near equilibrium (within 10% of range)
+		if math.Abs(bars[i].Close-equil) < innerRng*0.1 {
+			// Discount half (below equil) = Bullish IRL
+			if isValidZone(equil, innerLow) {
+				out = append(out, zone(TypeIRL, Bullish, equil, innerLow, i))
+			}
+			// Premium half (above equil) = Bearish IRL
+			if isValidZone(innerHigh, equil) {
+				out = append(out, zone(TypeIRL, Bearish, innerHigh, equil, i))
+			}
+		}
+
+		// ── Outer range (ERL) ─────────────────────────────────────────────────
+		outerHigh := bars[i-swingLen*2].High
+		outerLow := bars[i-swingLen*2].Low
+		for j := i - swingLen*2 + 1; j <= i; j++ {
+			if bars[j].High > outerHigh {
+				outerHigh = bars[j].High
+			}
+			if bars[j].Low < outerLow {
+				outerLow = bars[j].Low
+			}
+		}
+
+		atr14 := indicators.ATR(bars, 14)
+		atrVal := atr14[i]
+		if math.IsNaN(atrVal) || atrVal == 0 {
+			continue
+		}
+
+		// ERL high touched: price reaching outside the inner high toward outer high
+		if bars[i].High >= outerHigh {
+			top := outerHigh + atrVal*0.05
+			bot := outerHigh - atrVal*0.05
+			if isValidZone(top, bot) {
+				out = append(out, zone(TypeERL, Bullish, top, bot, i))
+			}
+		}
+		// ERL low touched: price reaching outside the inner low toward outer low
+		if bars[i].Low <= outerLow {
+			top := outerLow + atrVal*0.05
+			bot := outerLow - atrVal*0.05
+			if isValidZone(top, bot) {
+				out = append(out, zone(TypeERL, Bearish, top, bot, i))
+			}
+		}
+	}
+	return out
+}
+
+// ── Open Float Liquidity Pools ────────────────────────────────────────────────
+
+// detectOpenFloat detects institutional open-float liquidity pools at 20/40/60-bar
+// rolling highs and lows.
+//
+// When price reaches a new N-bar high/low, a thin zone is emitted to track
+// whether price respects or breaks through that pool level.
+//
+// Zone Mid is set to a lookback-significance multiplier:
+//
+//	20-bar → 1.0 (short-term float)
+//	40-bar → 1.5 (intermediate float)
+//	60-bar → 2.0 (longer-term float, most significant)
+//
+// Direction: Bullish = price made new high (bull continuation pool),
+// Bearish = price made new low (bear continuation pool).
+func detectOpenFloat(bars []data.OHLCV, atr []float64) []PDZone {
+	var out []PDZone
+	n := len(bars)
+	lookbacks := []struct {
+		period int
+		sig    float64 // significance multiplier stored in Mid
+	}{
+		{20, 1.0},
+		{40, 1.5},
+		{60, 2.0},
+	}
+
+	for i := 60; i < n; i++ {
+		atrVal := atr[i]
+		if math.IsNaN(atrVal) || atrVal == 0 {
+			continue
+		}
+
+		for _, lb := range lookbacks {
+			p := lb.period
+			if i < p {
+				continue
+			}
+
+			// Rolling high/low of the previous p bars (not including bar i)
+			prevHigh := bars[i-p].High
+			prevLow := bars[i-p].Low
+			for j := i - p + 1; j < i; j++ {
+				if bars[j].High > prevHigh {
+					prevHigh = bars[j].High
+				}
+				if bars[j].Low < prevLow {
+					prevLow = bars[j].Low
+				}
+			}
+
+			// Bullish: current bar makes a new N-bar high
+			if bars[i].High >= prevHigh {
+				top := bars[i].High + atrVal*0.1
+				bot := bars[i].High - atrVal*0.1
+				if isValidZone(top, bot) {
+					z := zone(TypeOpenFloat, Bullish, top, bot, i)
+					z.Mid = lb.sig
+					out = append(out, z)
+				}
+			}
+
+			// Bearish: current bar makes a new N-bar low
+			if bars[i].Low <= prevLow {
+				top := bars[i].Low + atrVal*0.1
+				bot := bars[i].Low - atrVal*0.1
+				if isValidZone(top, bot) {
+					z := zone(TypeOpenFloat, Bearish, top, bot, i)
+					z.Mid = lb.sig
+					out = append(out, z)
+				}
+			}
+		}
+	}
+	return out
+}
+
+// ── NWOG / NDOG (New Week / New Day Opening Gap) ──────────────────────────────
+
+// detectNWOGNDOG detects New Week Opening Gap (NWOG) and New Day Opening Gap (NDOG).
+//
+// NWOG: gap between Friday's close and the next Monday's open.
+//   - For daily bars: a Monday bar (weekday) where |open - prev_close| > ATR * 0.05.
+//   - For intraday bars: uses the actual hour to find the Friday 17:00 close vs
+//     Monday/Sunday 18:00 open gap window.
+//
+// NDOG: gap between the 17:00 (5pm) close and the 18:00 (6pm) open of the next session.
+//   - For daily bars: any gap between close[i-1] and open[i] on a different calendar day.
+//   - For intraday bars: uses actual bar timestamps.
+//
+// Gap direction:
+//   - Up-gap (open > prev close) → Bullish zone (acts as support)
+//   - Down-gap (open < prev close) → Bearish zone (acts as resistance)
+//
+// C.E. (Consequent Encroachment) = Mid = (top+bot)/2  ← already handled by zone().
+func detectNWOGNDOG(bars []data.OHLCV, atr []float64, interval string) []PDZone {
+	var out []PDZone
+	n := len(bars)
+	if n < 2 {
+		return out
+	}
+
+	isDaily := interval == "1d" || interval == "d"
+	isIntraday := !isDaily && interval != "1w" && interval != "w" && interval != "wk" &&
+		interval != "1mo" && interval != "mo"
+
+	for i := 1; i < n; i++ {
+		atrVal := atr[i]
+		if math.IsNaN(atrVal) || atrVal == 0 {
+			continue
+		}
+
+		prevClose := bars[i-1].Close
+		curOpen := bars[i].Open
+		gapSize := curOpen - prevClose // positive = up-gap, negative = down-gap
+
+		if isDaily {
+			// ── Daily bars: NWOG on Monday, NDOG on any trading day ──────────
+			prevTime := bars[i-1].Time
+			curTime := bars[i].Time
+
+			// NWOG: current bar is Monday (or the first bar after weekend)
+			prevWeekday := prevTime.Weekday()
+			curWeekday := curTime.Weekday()
+			isWeekGap := (curWeekday == time.Monday) ||
+				(prevWeekday == time.Friday && (curWeekday == time.Monday || curWeekday == time.Sunday))
+
+			minGap := atrVal * 0.05
+			if math.Abs(gapSize) >= minGap {
+				if isWeekGap {
+					top := math.Max(curOpen, prevClose)
+					bot := math.Min(curOpen, prevClose)
+					if isValidZone(top, bot) {
+						dir := Bullish
+						if gapSize < 0 {
+							dir = Bearish
+						}
+						out = append(out, zone(TypeNWOG, dir, top, bot, i))
+					}
+				} else {
+					// NDOG: any day-to-day gap
+					top := math.Max(curOpen, prevClose)
+					bot := math.Min(curOpen, prevClose)
+					if isValidZone(top, bot) {
+						dir := Bullish
+						if gapSize < 0 {
+							dir = Bearish
+						}
+						out = append(out, zone(TypeNDOG, dir, top, bot, i))
+					}
+				}
+			}
+
+		} else if isIntraday {
+			// ── Intraday bars: use actual timestamps ──────────────────────────
+			prevTime := bars[i-1].Time
+			curTime := bars[i].Time
+
+			prevDay := prevTime.Weekday()
+			curDay := curTime.Weekday()
+			prevHour := prevTime.Hour()
+			curHour := curTime.Hour()
+
+			// NWOG: Friday close (17:xx) → Sunday/Monday open (18:xx or first bar)
+			isFridayClose := (prevDay == time.Friday) && (prevHour >= 17)
+			isWeekOpen := (curDay == time.Sunday || curDay == time.Monday) && (curHour >= 17 || curHour <= 2)
+
+			minGap := atrVal * 0.05
+			if isFridayClose && isWeekOpen && math.Abs(gapSize) >= minGap {
+				top := math.Max(curOpen, prevClose)
+				bot := math.Min(curOpen, prevClose)
+				if isValidZone(top, bot) {
+					dir := Bullish
+					if gapSize < 0 {
+						dir = Bearish
+					}
+					out = append(out, zone(TypeNWOG, dir, top, bot, i))
+				}
+			}
+
+			// NDOG: 17:xx close → 18:xx open (different calendar day)
+			is5pmClose := prevHour == 17
+			is6pmOpen := curHour == 18
+			isDayChange := prevDay != curDay || (prevDay == curDay && prevHour > curHour)
+
+			if is5pmClose && is6pmOpen && isDayChange && math.Abs(gapSize) >= minGap {
+				top := math.Max(curOpen, prevClose)
+				bot := math.Min(curOpen, prevClose)
+				if isValidZone(top, bot) {
+					dir := Bullish
+					if gapSize < 0 {
+						dir = Bearish
+					}
+					out = append(out, zone(TypeNDOG, dir, top, bot, i))
+				}
+			}
+		}
+	}
+	return out
+}
+
 // ── Zone Tracking ─────────────────────────────────────────────────────────────
 
 // maxTouches: max sentuhan per zona — setelah ini zona dianggap "habis".
@@ -1026,6 +1576,17 @@ var orderedTypes = []struct {
 	{TypePremDiscount, Bullish}, {TypePremDiscount, Bearish},
 	{TypeBreakawayGap, Bullish}, {TypeBreakawayGap, Bearish},
 	{TypeRDRB, Bullish}, {TypeRDRB, Bearish},
+	{TypeIRL, Bullish}, {TypeIRL, Bearish},
+	{TypeERL, Bullish}, {TypeERL, Bearish},
+	{TypeOpenFloat, Bullish}, {TypeOpenFloat, Bearish},
+	{TypeNWOG, Bullish}, {TypeNWOG, Bearish},
+	{TypeNDOG, Bullish}, {TypeNDOG, Bearish},
+	// Liquidity group
+	{TypeBSL, Bullish}, {TypeBSL, Bearish},
+	{TypeSSL, Bullish}, {TypeSSL, Bearish},
+	{TypeLiqSweep, Bullish}, {TypeLiqSweep, Bearish},
+	{TypeLiqRun, Bullish}, {TypeLiqRun, Bearish},
+	{TypeLiqVoid, Bullish}, {TypeLiqVoid, Bearish},
 }
 
 type statKey struct {
@@ -1154,8 +1715,13 @@ func FormatResult(r *AnalyzeResult) string {
 	out += "\n━━━ *ORDER FLOW ZONES* ━━━\n"
 	out += formatGroupTable(sm, orderFlowTypes)
 
+	// ── Liquidity group ──────────────────────────────────────────────────────
+	liquidityTypes := []PDArrayType{TypeBSL, TypeSSL, TypeLiqSweep, TypeLiqRun, TypeLiqVoid}
+	out += "\n━━━ *LIQUIDITY ZONES* ━━━\n"
+	out += formatGroupTable(sm, liquidityTypes)
+
 	// ── Structural group ─────────────────────────────────────────────────────
-	structuralTypes := []PDArrayType{TypeIFVG, TypePremDiscount, TypeBreakawayGap, TypeRDRB}
+	structuralTypes := []PDArrayType{TypeIFVG, TypePremDiscount, TypeBreakawayGap, TypeRDRB, TypeIRL, TypeERL, TypeOpenFloat, TypeNWOG, TypeNDOG}
 	out += "\n━━━ *STRUCTURAL ZONES* ━━━\n"
 	out += formatGroupTable(sm, structuralTypes)
 
