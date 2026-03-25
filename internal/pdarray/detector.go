@@ -1,7 +1,8 @@
 // Package pdarray provides detection and statistical tracking of ICT PD Array zones.
-// It identifies 25 zone types across Bullish/Bearish directions, then measures
+// It identifies 33 zone types across Bullish/Bearish directions, then measures
 // whether each zone was subsequently "respected" (price bounced) or "breached"
 // (price closed through the zone).
+// Types: 15 original + 10 ICT Liquidity (Part 2) + 8 Market Structure (Part 3).
 package pdarray
 
 import (
@@ -57,6 +58,43 @@ const (
 	// NWOG/NDOG: New Week / New Day Opening Gap
 	TypeNWOG PDArrayType = "NWOG"
 	TypeNDOG PDArrayType = "NDOG"
+
+	// ── ICT Market Structure & Profiles (Part 3) ─────────────────────────────
+
+	// TypeBOS: Break of Structure — close through last confirmed swing high/low
+	// confirming trend continuation.
+	TypeBOS PDArrayType = "BOS"
+
+	// TypeCHoCH: Change of Character — close through a swing that is LOWER than
+	// the previous swing high (bearish context → bullish flip) or HIGHER than the
+	// previous swing low (bullish context → bearish flip).  Early reversal signal.
+	TypeCHoCH PDArrayType = "CHoCH"
+
+	// TypeJudasSwing: False breakout at session/candle open — wick through a
+	// swing level but close snaps back inside, indicating a stop-hunt before
+	// the real directional move.
+	TypeJudasSwing PDArrayType = "JudasSwing"
+
+	// TypeHRLR: High-Resistance Liquidity Run zone — price is crawling through a
+	// well-traded, two-sided-order area (consolidation).  Slow, choppy movement.
+	TypeHRLR PDArrayType = "HRLR"
+
+	// TypeLRLR: Low-Resistance Liquidity Run — large displacement candle body
+	// indicating price is moving through an area with few opposing orders.
+	TypeLRLR PDArrayType = "LRLR"
+
+	// TypeMarketPhase: Accumulation (Bullish) or Distribution (Bearish) phase
+	// detected via ATR compression / expansion logic.
+	TypeMarketPhase PDArrayType = "MarketPhase"
+
+	// TypeSessionRange: Asia / London / NY session high-low reference level.
+	// Top = bearish resistance; Bottom = bullish support.
+	TypeSessionRange PDArrayType = "SessionRange"
+
+	// TypeSMTDiv: Smart Money Technique Divergence proxy — internal hidden
+	// divergence between price extremes and close direction.
+	// NOTE: for true SMT compare with a correlated instrument (e.g. DXY vs EUR/USD).
+	TypeSMTDiv PDArrayType = "SMTDiv"
 )
 
 // Direction is the bias of a PD Array zone.
@@ -188,6 +226,16 @@ func Analyze(bars []data.OHLCV, symbol, interval string) *AnalyzeResult {
 	zones = append(zones, detectIRLERL(bars)...)
 	zones = append(zones, detectOpenFloat(bars, atr)...)
 	zones = append(zones, detectNWOGNDOG(bars, atr, interval)...)
+
+	// ── ICT Market Structure & Profiles detectors (Part 3) ──────────────────
+	zones = append(zones, detectBOS(bars, atr)...)
+	zones = append(zones, detectCHoCH(bars, atr)...)
+	zones = append(zones, detectJudasSwing(bars, atr)...)
+	zones = append(zones, detectHRLR(bars, atr)...)
+	zones = append(zones, detectLRLR(bars, atr)...)
+	zones = append(zones, detectMarketPhase(bars, atr)...)
+	zones = append(zones, detectSessionRange(bars, interval)...)
+	zones = append(zones, detectSMTDiv(bars, atr)...)
 
 	// ── Tracking phase ───────────────────────────────────────────────────────
 	lookFwd := lookForwardBars(interval)
@@ -1551,6 +1599,572 @@ func trackZones(bars []data.OHLCV, zones []PDZone, lookForward int) {
 	}
 }
 
+// ── BOS (Break of Structure) ─────────────────────────────────────────────────
+
+// detectBOS emits a zone every time price closes through a confirmed swing
+// high (Bullish BOS — trend continuation up) or swing low (Bearish BOS —
+// trend continuation down).
+//
+// Swing confirmation uses a 5-bar window on each side (pivot high/low).
+// The zone is a thin band around the breached level (±ATR×0.05) so
+// trackZones can register subsequent price reactions to that level.
+func detectBOS(bars []data.OHLCV, atr []float64) []PDZone {
+	var out []PDZone
+	n := len(bars)
+	const swingWin = 5
+
+	// Collect confirmed swing highs and lows first.
+	type sp struct {
+		idx   int
+		price float64
+	}
+	var swingHighs, swingLows []sp
+
+	for i := swingWin; i < n-swingWin; i++ {
+		isH, isL := true, true
+		for j := i - swingWin; j <= i+swingWin; j++ {
+			if j == i {
+				continue
+			}
+			if bars[j].High >= bars[i].High {
+				isH = false
+			}
+			if bars[j].Low <= bars[i].Low {
+				isL = false
+			}
+		}
+		if isH {
+			swingHighs = append(swingHighs, sp{i, bars[i].High})
+		}
+		if isL {
+			swingLows = append(swingLows, sp{i, bars[i].Low})
+		}
+	}
+
+	// For each swing, scan forward: first close that breaks it = BOS.
+	for _, sh := range swingHighs {
+		atrVal := atr[sh.idx]
+		if math.IsNaN(atrVal) || atrVal == 0 {
+			continue
+		}
+		for k := sh.idx + 1; k < n; k++ {
+			if bars[k].Close > sh.price {
+				half := atrVal * 0.05
+				top := sh.price + half
+				bot := sh.price - half
+				if isValidZone(top, bot) {
+					out = append(out, zone(TypeBOS, Bullish, top, bot, k))
+				}
+				break
+			}
+		}
+	}
+	for _, sl := range swingLows {
+		atrVal := atr[sl.idx]
+		if math.IsNaN(atrVal) || atrVal == 0 {
+			continue
+		}
+		for k := sl.idx + 1; k < n; k++ {
+			if bars[k].Close < sl.price {
+				half := atrVal * 0.05
+				top := sl.price + half
+				bot := sl.price - half
+				if isValidZone(top, bot) {
+					out = append(out, zone(TypeBOS, Bearish, top, bot, k))
+				}
+				break
+			}
+		}
+	}
+	return out
+}
+
+// ── CHoCH (Change of Character) ──────────────────────────────────────────────
+
+// detectCHoCH identifies early trend-reversal signals.
+//
+// Bullish CHoCH: market is in a downtrend (last confirmed swing high is LOWER
+// than the previous swing high).  When price closes ABOVE that lower swing high,
+// character is changing → emit Bullish CHoCH at that level.
+//
+// Bearish CHoCH: market is in an uptrend (last confirmed swing low is HIGHER
+// than the previous swing low).  When price closes BELOW that higher swing low,
+// character is changing → emit Bearish CHoCH.
+func detectCHoCH(bars []data.OHLCV, atr []float64) []PDZone {
+	var out []PDZone
+	n := len(bars)
+	const swingWin = 5
+
+	type sp struct {
+		idx   int
+		price float64
+	}
+	var swingHighs, swingLows []sp
+
+	for i := swingWin; i < n-swingWin; i++ {
+		isH, isL := true, true
+		for j := i - swingWin; j <= i+swingWin; j++ {
+			if j == i {
+				continue
+			}
+			if bars[j].High >= bars[i].High {
+				isH = false
+			}
+			if bars[j].Low <= bars[i].Low {
+				isL = false
+			}
+		}
+		if isH {
+			swingHighs = append(swingHighs, sp{i, bars[i].High})
+		}
+		if isL {
+			swingLows = append(swingLows, sp{i, bars[i].Low})
+		}
+	}
+
+	// Bullish CHoCH: need at least 2 swing highs.
+	// Walk through consecutive pairs; if sh[k] < sh[k-1] (lower high = downtrend)
+	// scan forward for a close above sh[k].
+	for k := 1; k < len(swingHighs); k++ {
+		prev := swingHighs[k-1]
+		cur := swingHighs[k]
+		if cur.price >= prev.price {
+			continue // not a lower high; no downtrend context
+		}
+		atrVal := atr[cur.idx]
+		if math.IsNaN(atrVal) || atrVal == 0 {
+			continue
+		}
+		for j := cur.idx + 1; j < n; j++ {
+			if bars[j].Close > cur.price {
+				half := atrVal * 0.05
+				top := cur.price + half
+				bot := cur.price - half
+				if isValidZone(top, bot) {
+					out = append(out, zone(TypeCHoCH, Bullish, top, bot, j))
+				}
+				break
+			}
+			// Stop if price already made a new swing high beyond prev
+			if bars[j].High > prev.price {
+				break
+			}
+		}
+	}
+
+	// Bearish CHoCH: need at least 2 swing lows.
+	for k := 1; k < len(swingLows); k++ {
+		prev := swingLows[k-1]
+		cur := swingLows[k]
+		if cur.price <= prev.price {
+			continue // not a higher low; no uptrend context
+		}
+		atrVal := atr[cur.idx]
+		if math.IsNaN(atrVal) || atrVal == 0 {
+			continue
+		}
+		for j := cur.idx + 1; j < n; j++ {
+			if bars[j].Close < cur.price {
+				half := atrVal * 0.05
+				top := cur.price + half
+				bot := cur.price - half
+				if isValidZone(top, bot) {
+					out = append(out, zone(TypeCHoCH, Bearish, top, bot, j))
+				}
+				break
+			}
+			if bars[j].Low < prev.price {
+				break
+			}
+		}
+	}
+	return out
+}
+
+// ── JudasSwing ────────────────────────────────────────────────────────────────
+
+// detectJudasSwing identifies false-breakout / stop-hunt bars:
+// the wick pierces a recent swing level but the close snaps back inside,
+// signalling that the real move is in the opposite direction.
+//
+// Bearish Judas: high > recent pivot high AND close < pivot high.
+// Zone = area between close and wick high (the spike zone).
+//
+// Bullish Judas: low < recent pivot low AND close > pivot low.
+// Zone = area between pivot low and wick low.
+//
+// Pivot reference: most recent confirmed pivot within the last 10 bars
+// using a 3-bar window (lighter than the 5-bar BOS/CHoCH detector to
+// catch intrabar manipulations at session opens).
+func detectJudasSwing(bars []data.OHLCV, atr []float64) []PDZone {
+	var out []PDZone
+	n := len(bars)
+	const refLookback = 10
+	const pivWin = 3
+
+	for i := pivWin + refLookback; i < n; i++ {
+		atrVal := atr[i]
+		if math.IsNaN(atrVal) || atrVal == 0 {
+			continue
+		}
+
+		// Find most recent pivot high/low within last refLookback bars
+		var pivHigh, pivLow float64
+		pivHigh, pivLow = 0, math.MaxFloat64
+
+		for p := i - refLookback; p < i-pivWin; p++ {
+			isH, isL := true, true
+			for j := p - pivWin; j <= p+pivWin; j++ {
+				if j < 0 || j >= n || j == p {
+					continue
+				}
+				if bars[j].High >= bars[p].High {
+					isH = false
+				}
+				if bars[j].Low <= bars[p].Low {
+					isL = false
+				}
+			}
+			if isH && bars[p].High > pivHigh {
+				pivHigh = bars[p].High
+			}
+			if isL && bars[p].Low < pivLow {
+				pivLow = bars[p].Low
+			}
+		}
+
+		// Bearish Judas: wick above pivot high, close back below
+		if pivHigh > 0 && bars[i].High > pivHigh && bars[i].Close < pivHigh {
+			top := bars[i].High
+			bot := pivHigh
+			if isValidZone(top, bot) {
+				out = append(out, zone(TypeJudasSwing, Bearish, top, bot, i))
+			} else {
+				// Degenerate: ensure minimal zone
+				top = pivHigh + atrVal*0.05
+				bot = pivHigh - atrVal*0.02
+				if isValidZone(top, bot) {
+					out = append(out, zone(TypeJudasSwing, Bearish, top, bot, i))
+				}
+			}
+		}
+
+		// Bullish Judas: wick below pivot low, close back above
+		if pivLow < math.MaxFloat64 && bars[i].Low < pivLow && bars[i].Close > pivLow {
+			top := pivLow
+			bot := bars[i].Low
+			if isValidZone(top, bot) {
+				out = append(out, zone(TypeJudasSwing, Bullish, top, bot, i))
+			} else {
+				top = pivLow + atrVal*0.02
+				bot = pivLow - atrVal*0.05
+				if isValidZone(top, bot) {
+					out = append(out, zone(TypeJudasSwing, Bullish, top, bot, i))
+				}
+			}
+		}
+	}
+	return out
+}
+
+// ── HRLR (High Resistance Liquidity Run) ─────────────────────────────────────
+
+// detectHRLR marks consolidated, two-sided-order areas where price movement
+// is slow and choppy.  Condition: 20-bar range < ATR(14) × 20 × 0.35.
+// The zone spans the full H-L of that 20-bar window.
+// Direction = Bullish if close > midpoint (price in lower half → support),
+//
+//	Bearish if close < midpoint (price in upper half → resistance).
+func detectHRLR(bars []data.OHLCV, atr []float64) []PDZone {
+	var out []PDZone
+	const n20 = 20
+
+	for i := n20; i < len(bars); i++ {
+		atrVal := atr[i]
+		if math.IsNaN(atrVal) || atrVal == 0 {
+			continue
+		}
+		// Compute range of last n20 bars
+		hi := bars[i-n20].High
+		lo := bars[i-n20].Low
+		for j := i - n20 + 1; j <= i; j++ {
+			if bars[j].High > hi {
+				hi = bars[j].High
+			}
+			if bars[j].Low < lo {
+				lo = bars[j].Low
+			}
+		}
+		rng := hi - lo
+		if rng <= 0 || !isValidZone(hi, lo) {
+			continue
+		}
+		// Only emit if range is "tight" relative to ATR
+		if rng >= atrVal*float64(n20)*0.35 {
+			continue
+		}
+		mid := (hi + lo) / 2
+		dir := Bullish
+		if bars[i].Close < mid {
+			dir = Bearish
+		}
+		out = append(out, zone(TypeHRLR, dir, hi, lo, i))
+	}
+	return out
+}
+
+// ── LRLR (Low Resistance Liquidity Run) ──────────────────────────────────────
+
+// detectLRLR marks large displacement candles — price is moving through an
+// area with few opposing orders, resulting in a fast, impulsive move.
+// Condition: candle body > ATR × 1.5.
+// Zone = the candle body (max(O,C) → min(O,C)).
+// Direction = Bullish if bullish body, Bearish if bearish body.
+func detectLRLR(bars []data.OHLCV, atr []float64) []PDZone {
+	var out []PDZone
+
+	for i := 0; i < len(bars); i++ {
+		atrVal := atr[i]
+		if math.IsNaN(atrVal) || atrVal == 0 {
+			continue
+		}
+		body := math.Abs(bars[i].Close - bars[i].Open)
+		if body <= atrVal*1.5 {
+			continue
+		}
+		top := math.Max(bars[i].Open, bars[i].Close)
+		bot := math.Min(bars[i].Open, bars[i].Close)
+		if !isValidZone(top, bot) {
+			continue
+		}
+		dir := Bullish
+		if bars[i].Open > bars[i].Close {
+			dir = Bearish
+		}
+		out = append(out, zone(TypeLRLR, dir, top, bot, i))
+	}
+	return out
+}
+
+// ── MarketPhase ───────────────────────────────────────────────────────────────
+
+// detectMarketPhase identifies Accumulation (Bullish) and Distribution
+// (Bearish) phases.
+//
+// Accumulation: ATR contracts below 70% of its 20-bar average → quiet
+// consolidation where smart money builds positions.  Direction = Bullish
+// (bias up from accumulation).
+//
+// Distribution: large bearish expansion candle (body > ATR×1.5) with close
+// below the prior bar's open → smart money distributing / offloading longs.
+// Direction = Bearish.
+//
+// Zone spans the 20-bar H-L window for Accumulation, or candle body for
+// Distribution.
+func detectMarketPhase(bars []data.OHLCV, atr []float64) []PDZone {
+	var out []PDZone
+	const avgWin = 20
+
+	for i := avgWin; i < len(bars); i++ {
+		atrVal := atr[i]
+		if math.IsNaN(atrVal) || atrVal == 0 {
+			continue
+		}
+
+		// Compute average ATR over last avgWin bars
+		sum := 0.0
+		cnt := 0
+		for j := i - avgWin; j < i; j++ {
+			if !math.IsNaN(atr[j]) && atr[j] > 0 {
+				sum += atr[j]
+				cnt++
+			}
+		}
+		if cnt == 0 {
+			continue
+		}
+		avgATR := sum / float64(cnt)
+
+		// ── Accumulation: ATR compression ────────────────────────────────────
+		if atrVal < avgATR*0.7 {
+			hi := bars[i-avgWin].High
+			lo := bars[i-avgWin].Low
+			for j := i - avgWin + 1; j <= i; j++ {
+				if bars[j].High > hi {
+					hi = bars[j].High
+				}
+				if bars[j].Low < lo {
+					lo = bars[j].Low
+				}
+			}
+			if isValidZone(hi, lo) {
+				out = append(out, zone(TypeMarketPhase, Bullish, hi, lo, i))
+			}
+		}
+
+		// ── Distribution: large bearish expansion ─────────────────────────────
+		body := bars[i].Open - bars[i].Close // positive if bearish
+		if body > atrVal*1.5 && bars[i].Close < bars[i-1].Open {
+			top := bars[i].Open
+			bot := bars[i].Close
+			if isValidZone(top, bot) {
+				out = append(out, zone(TypeMarketPhase, Bearish, top, bot, i))
+			}
+		}
+	}
+	return out
+}
+
+// ── SessionRange ──────────────────────────────────────────────────────────────
+
+// detectSessionRange emits high/low reference zones for each completed trading
+// session (Asia 00-08 UTC, London 08-16 UTC, NY 13-21 UTC).
+//
+// For daily (1d) bars the concept is not meaningful — skipped.
+// For intraday bars we use bar.Time (UTC) to detect session transitions and
+// emit two zones per session:
+//   - Top zone (Bearish): session high ± ATR×0.05 → acts as resistance
+//   - Bottom zone (Bullish): session low ± ATR×0.05 → acts as support
+func detectSessionRange(bars []data.OHLCV, interval string) []PDZone {
+	var out []PDZone
+	n := len(bars)
+
+	// Skip daily / weekly / monthly bars — session concept not applicable.
+	switch interval {
+	case "1d", "d", "1w", "w", "wk", "1mo", "mo":
+		return out
+	}
+
+	atr := indicators.ATR(bars, 14)
+
+	const (
+		asiaStart   = 0
+		asiaEnd     = 8
+		londonStart = 8
+		londonEnd   = 16
+		nyStart     = 13
+		nyEnd       = 21
+	)
+
+	type sessionState struct {
+		hi, lo     float64
+		active     bool
+		startHour  int
+		endHour    int
+		label      string
+	}
+
+	sessions := []sessionState{
+		{hi: -math.MaxFloat64, lo: math.MaxFloat64, startHour: asiaStart, endHour: asiaEnd, label: "Asia"},
+		{hi: -math.MaxFloat64, lo: math.MaxFloat64, startHour: londonStart, endHour: londonEnd, label: "London"},
+		{hi: -math.MaxFloat64, lo: math.MaxFloat64, startHour: nyStart, endHour: nyEnd, label: "NY"},
+	}
+
+	for i := 0; i < n; i++ {
+		h := bars[i].Time.UTC().Hour()
+		atrVal := atr[i]
+		if math.IsNaN(atrVal) || atrVal == 0 {
+			atrVal = 0.001
+		}
+
+		for s := range sessions {
+			sess := &sessions[s]
+			inSess := h >= sess.startHour && h < sess.endHour
+
+			if inSess {
+				if !sess.active {
+					// Session just started — reset accumulation
+					sess.hi = bars[i].High
+					sess.lo = bars[i].Low
+					sess.active = true
+				} else {
+					if bars[i].High > sess.hi {
+						sess.hi = bars[i].High
+					}
+					if bars[i].Low < sess.lo {
+						sess.lo = bars[i].Low
+					}
+				}
+			} else if sess.active {
+				// Session just ended — emit zones for the completed session
+				half := atrVal * 0.05
+				// Bearish resistance at session high
+				topH := sess.hi + half
+				botH := sess.hi - half
+				if isValidZone(topH, botH) {
+					out = append(out, zone(TypeSessionRange, Bearish, topH, botH, i))
+				}
+				// Bullish support at session low
+				topL := sess.lo + half
+				botL := sess.lo - half
+				if isValidZone(topL, botL) {
+					out = append(out, zone(TypeSessionRange, Bullish, topL, botL, i))
+				}
+				// Reset
+				sess.hi = -math.MaxFloat64
+				sess.lo = math.MaxFloat64
+				sess.active = false
+			}
+		}
+	}
+	return out
+}
+
+// ── SMTDiv (Smart Money Technique Divergence proxy) ───────────────────────────
+
+// detectSMTDiv detects internal hidden divergence as a single-instrument proxy
+// for true SMT Divergence (which normally compares two correlated instruments,
+// e.g. EUR/USD vs DXY).
+//
+// The proxy logic over a 5-bar lookback window:
+//
+//	Bearish SMTDiv (hidden bearish): price makes a higher high AND a higher low
+//	  BUT close[i] < close[i-3] → momentum is fading despite new high.
+//
+//	Bullish SMTDiv (hidden bullish): price makes a lower low AND a lower high
+//	  BUT close[i] > close[i-3] → momentum is strengthening despite new low.
+//
+// Zone: thin band around close (±ATR×0.05).
+//
+// NOTE: for genuine SMT analysis compare with a correlated instrument
+// (e.g. EURUSD vs DXY, or ES vs NQ). This detector is a single-symbol proxy.
+func detectSMTDiv(bars []data.OHLCV, atr []float64) []PDZone {
+	var out []PDZone
+	const lb = 5
+
+	for i := lb; i < len(bars); i++ {
+		atrVal := atr[i]
+		if math.IsNaN(atrVal) || atrVal == 0 {
+			continue
+		}
+		half := atrVal * 0.05
+
+		higherHigh := bars[i].High > bars[i-lb].High
+		higherLow := bars[i].Low > bars[i-lb].Low
+		lowerHigh := bars[i].High < bars[i-lb].High
+		lowerLow := bars[i].Low < bars[i-lb].Low
+
+		// Bearish hidden divergence: higher high + higher low but close falling
+		if higherHigh && higherLow && bars[i].Close < bars[i-3].Close {
+			top := bars[i].Close + half
+			bot := bars[i].Close - half
+			if isValidZone(top, bot) {
+				out = append(out, zone(TypeSMTDiv, Bearish, top, bot, i))
+			}
+		}
+
+		// Bullish hidden divergence: lower low + lower high but close rising
+		if lowerLow && lowerHigh && bars[i].Close > bars[i-3].Close {
+			top := bars[i].Close + half
+			bot := bars[i].Close - half
+			if isValidZone(top, bot) {
+				out = append(out, zone(TypeSMTDiv, Bullish, top, bot, i))
+			}
+		}
+	}
+	return out
+}
+
 // ── Aggregation ───────────────────────────────────────────────────────────────
 
 // orderedTypes defines the canonical order of (type, direction) pairs for display.
@@ -1587,6 +2201,15 @@ var orderedTypes = []struct {
 	{TypeLiqSweep, Bullish}, {TypeLiqSweep, Bearish},
 	{TypeLiqRun, Bullish}, {TypeLiqRun, Bearish},
 	{TypeLiqVoid, Bullish}, {TypeLiqVoid, Bearish},
+	{TypeHRLR, Bullish}, {TypeHRLR, Bearish},
+	{TypeLRLR, Bullish}, {TypeLRLR, Bearish},
+	// Market Structure & Signals group
+	{TypeBOS, Bullish}, {TypeBOS, Bearish},
+	{TypeCHoCH, Bullish}, {TypeCHoCH, Bearish},
+	{TypeJudasSwing, Bullish}, {TypeJudasSwing, Bearish},
+	{TypeMarketPhase, Bullish}, {TypeMarketPhase, Bearish},
+	{TypeSessionRange, Bullish}, {TypeSessionRange, Bearish},
+	{TypeSMTDiv, Bullish}, {TypeSMTDiv, Bearish},
 }
 
 type statKey struct {
@@ -1716,7 +2339,7 @@ func FormatResult(r *AnalyzeResult) string {
 	out += formatGroupTable(sm, orderFlowTypes)
 
 	// ── Liquidity group ──────────────────────────────────────────────────────
-	liquidityTypes := []PDArrayType{TypeBSL, TypeSSL, TypeLiqSweep, TypeLiqRun, TypeLiqVoid}
+	liquidityTypes := []PDArrayType{TypeBSL, TypeSSL, TypeLiqSweep, TypeLiqRun, TypeLiqVoid, TypeHRLR, TypeLRLR}
 	out += "\n━━━ *LIQUIDITY ZONES* ━━━\n"
 	out += formatGroupTable(sm, liquidityTypes)
 
@@ -1724,6 +2347,11 @@ func FormatResult(r *AnalyzeResult) string {
 	structuralTypes := []PDArrayType{TypeIFVG, TypePremDiscount, TypeBreakawayGap, TypeRDRB, TypeIRL, TypeERL, TypeOpenFloat, TypeNWOG, TypeNDOG}
 	out += "\n━━━ *STRUCTURAL ZONES* ━━━\n"
 	out += formatGroupTable(sm, structuralTypes)
+
+	// ── Market Structure & Signals group ─────────────────────────────────────
+	structureSignalTypes := []PDArrayType{TypeBOS, TypeCHoCH, TypeJudasSwing, TypeMarketPhase, TypeSessionRange, TypeSMTDiv}
+	out += "\n━━━ *STRUCTURE SIGNALS* ━━━\n"
+	out += formatGroupTable(sm, structureSignalTypes)
 
 	// ── Overall ──────────────────────────────────────────────────────────────
 	out += "\n━━━ *OVERALL* ━━━\n"
