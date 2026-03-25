@@ -250,33 +250,73 @@ func detectBreakerBlocks(bars []data.OHLCV, bullOBs, bearOBs []PDZone) []PDZone 
 
 // ── Mitigation Block ──────────────────────────────────────────────────────────
 
+// detectMitigationBlocks uses a 3-bar confirmation window (not just 1-bar neighbor)
+// and requires the swing to have a meaningful range (>= 0.5x ATR) to filter noise.
 func detectMitigationBlocks(bars []data.OHLCV) []PDZone {
 	var out []PDZone
 	n := len(bars)
+	atr := indicators.ATR(bars, 14)
 
-	for i := 1; i < n-1; i++ {
-		// Swing low: lower than both neighbors
-		if bars[i].Low < bars[i-1].Low && bars[i].Low < bars[i+1].Low {
-			swingLow := bars[i].Low
-			for k := i + 2; k < n; k++ {
-				if bars[k].Close < swingLow {
-					if isValidZone(bars[i].High, bars[i].Low) {
-						out = append(out, zone(TypeMitigationBlock, Bullish, bars[i].High, bars[i].Low, i))
+	const swingWin = 3 // bars on each side for swing confirmation
+	const maxFwd = 50  // max bars to look forward for the mitigation trigger
+
+	for i := swingWin; i < n-swingWin; i++ {
+		atrVal := atr[i]
+		if math.IsNaN(atrVal) || atrVal == 0 {
+			continue
+		}
+
+		// ── Swing Low ────────────────────────────────────────────────────────
+		isSwingLow := true
+		for j := i - swingWin; j <= i+swingWin; j++ {
+			if j != i && bars[j].Low <= bars[i].Low {
+				isSwingLow = false
+				break
+			}
+		}
+		if isSwingLow {
+			// Zone must be at least 0.5 ATR tall to matter
+			zoneRng := bars[i].High - bars[i].Low
+			if zoneRng >= atrVal*0.5 {
+				swingLow := bars[i].Low
+				end := i + maxFwd
+				if end > n {
+					end = n
+				}
+				for k := i + swingWin + 1; k < end; k++ {
+					if bars[k].Close < swingLow {
+						if isValidZone(bars[i].High, bars[i].Low) {
+							out = append(out, zone(TypeMitigationBlock, Bullish, bars[i].High, bars[i].Low, i))
+						}
+						break
 					}
-					break
 				}
 			}
 		}
 
-		// Swing high: higher than both neighbors
-		if bars[i].High > bars[i-1].High && bars[i].High > bars[i+1].High {
-			swingHigh := bars[i].High
-			for k := i + 2; k < n; k++ {
-				if bars[k].Close > swingHigh {
-					if isValidZone(bars[i].High, bars[i].Low) {
-						out = append(out, zone(TypeMitigationBlock, Bearish, bars[i].High, bars[i].Low, i))
+		// ── Swing High ───────────────────────────────────────────────────────
+		isSwingHigh := true
+		for j := i - swingWin; j <= i+swingWin; j++ {
+			if j != i && bars[j].High >= bars[i].High {
+				isSwingHigh = false
+				break
+			}
+		}
+		if isSwingHigh {
+			zoneRng := bars[i].High - bars[i].Low
+			if zoneRng >= atrVal*0.5 {
+				swingHigh := bars[i].High
+				end := i + maxFwd
+				if end > n {
+					end = n
+				}
+				for k := i + swingWin + 1; k < end; k++ {
+					if bars[k].Close > swingHigh {
+						if isValidZone(bars[i].High, bars[i].Low) {
+							out = append(out, zone(TypeMitigationBlock, Bearish, bars[i].High, bars[i].Low, i))
+						}
+						break
 					}
-					break
 				}
 			}
 		}
@@ -333,17 +373,26 @@ func detectPropulsionBlocks(bars []data.OHLCV, bullOBs, bearOBs, bullFVGs, bearF
 
 // ── Volume Imbalance ──────────────────────────────────────────────────────────
 
+// detectVolumeImbalances detects open-vs-prevClose gaps >= 0.1 * ATR.
 func detectVolumeImbalances(bars []data.OHLCV) []PDZone {
 	var out []PDZone
+	atr := indicators.ATR(bars, 14)
+
 	for i := 1; i < len(bars); i++ {
+		atrVal := atr[i]
+		if math.IsNaN(atrVal) || atrVal == 0 {
+			continue
+		}
+		minGap := atrVal * 0.1
+
 		if bars[i].Open > bars[i-1].Close {
 			top, bot := bars[i].Open, bars[i-1].Close
-			if isValidZone(top, bot) {
+			if isValidZone(top, bot) && (top-bot) >= minGap {
 				out = append(out, zone(TypeVolumeImbalance, Bullish, top, bot, i))
 			}
 		} else if bars[i].Open < bars[i-1].Close {
 			top, bot := bars[i-1].Close, bars[i].Open
-			if isValidZone(top, bot) {
+			if isValidZone(top, bot) && (top-bot) >= minGap {
 				out = append(out, zone(TypeVolumeImbalance, Bearish, top, bot, i))
 			}
 		}
@@ -381,16 +430,26 @@ func detectIFVGs(bars []data.OHLCV, bullFVGs, bearFVGs []PDZone) []PDZone {
 
 // ── Implied FVG ───────────────────────────────────────────────────────────────
 
+// detectImpliedFVGs detects gaps implied by wick structure.
+// Requires gap >= 0.1 * ATR to filter micro-gaps that are just tick noise.
 func detectImpliedFVGs(bars []data.OHLCV) []PDZone {
 	var out []PDZone
+	atr := indicators.ATR(bars, 14)
+
 	for i := 1; i < len(bars); i++ {
 		prev := bars[i-1]
 		cur := bars[i]
 
+		atrVal := atr[i]
+		if math.IsNaN(atrVal) || atrVal == 0 {
+			continue
+		}
+		minGap := atrVal * 0.1
+
 		// Bullish Implied FVG: open > prev close AND open < prev high
 		if cur.Open > prev.Close && cur.Open < prev.High {
 			top, bot := cur.Open, prev.Close
-			if isValidZone(top, bot) {
+			if isValidZone(top, bot) && (top-bot) >= minGap {
 				out = append(out, zone(TypeImpliedFVG, Bullish, top, bot, i))
 			}
 		}
@@ -398,7 +457,7 @@ func detectImpliedFVGs(bars []data.OHLCV) []PDZone {
 		// Bearish Implied FVG: open < prev close AND open > prev low
 		if cur.Open < prev.Close && cur.Open > prev.Low {
 			top, bot := prev.Close, cur.Open
-			if isValidZone(top, bot) {
+			if isValidZone(top, bot) && (top-bot) >= minGap {
 				out = append(out, zone(TypeImpliedFVG, Bearish, top, bot, i))
 			}
 		}
@@ -814,20 +873,27 @@ func detectRDRB(bars []data.OHLCV, atr []float64) []PDZone {
 
 // ── Zone Tracking ─────────────────────────────────────────────────────────────
 
-// trackZones implements a multiple-touch model:
+// Tracking parameters — tuned to reflect realistic zone relevance windows.
+const (
+	// maxLookForward: how many bars after formation we track the zone.
+	// Beyond this the zone is considered "expired / no longer relevant".
+	// 100 bars on 1h ≈ 4 trading days. On 1d ≈ 5 months.
+	maxLookForward = 100
+
+	// maxTouches: after this many touches we stop tracking the zone.
+	// ICT zones lose significance after repeated tests.
+	maxTouches = 3
+)
+
+// trackZones implements a multiple-touch model with expiry limits:
 //
-//   For each zone we scan every bar after formation. When price enters the zone
-//   we start a "touch". The touch resolves when price closes:
-//     - back outside the zone on the entry side  → Respected touch
-//     - through the far boundary of the zone     → Breached (zone invalidated)
-//
-//   Multiple respected touches are possible. The zone is only marked Breached
-//   once a close punches completely through it. After that, the zone is dead
-//   and no further touches are counted.
-//
-//   "Inside zone" state is tracked with a simple flag so that a bar that opens
-//   outside and closes inside (partial entry) counts as "still inside" until
-//   it resolves.
+//   For each zone we scan up to maxLookForward bars after formation.
+//   Each time price enters the zone we count a "touch" (max maxTouches).
+//   A touch resolves when price closes:
+//     - back outside the zone on the entry side → Respected touch (+1 Respected)
+//     - through the far boundary               → Breached (zone dead, stop)
+//   After maxTouches the zone is considered expired regardless of outcome.
+//   Zones never touched within maxLookForward bars are marked Untested.
 func trackZones(bars []data.OHLCV, zones []PDZone) {
 	n := len(bars)
 	for i := range zones {
@@ -836,56 +902,61 @@ func trackZones(bars []data.OHLCV, zones []PDZone) {
 			continue
 		}
 
-		inTouch := false // currently inside the zone (touch in progress)
+		inTouch := false
+		endBar := z.BarIndex + 1 + maxLookForward
+		if endBar > n {
+			endBar = n
+		}
 
-		for k := z.BarIndex + 1; k < n; k++ {
+		for k := z.BarIndex + 1; k < endBar; k++ {
+			// Stop if we've hit the max-touch cap
+			if z.Touches >= maxTouches {
+				break
+			}
+
 			bar := bars[k]
 
 			if z.Direction == Bullish {
-				// ── price enters zone when bar's low reaches or pierces zone top ──
 				if !inTouch && bar.Low <= z.Top {
 					inTouch = true
 					z.Tested = true
 					z.Touches++
 				}
-
 				if inTouch {
 					if bar.Close < z.Bottom {
-						// Close below zone bottom → BREACHED, zone is dead
+						// Closed below zone → BREACHED, zone is dead
 						z.Breached = true
 						inTouch = false
 						break
 					}
 					if bar.Close > z.Top {
-						// Close back above zone top → touch RESPECTED, zone still active
+						// Bounced back above zone top → RESPECTED touch
 						z.Respected++
 						inTouch = false
-						// zone remains active for future touches
+						// zone stays active for next touch (up to maxTouches)
 					}
-					// close inside zone → still in touch, wait for next bar
+					// close still inside zone → remain in touch
 				}
 
 			} else { // Bearish
-				// ── price enters zone when bar's high reaches or pierces zone bottom ──
 				if !inTouch && bar.High >= z.Bottom {
 					inTouch = true
 					z.Tested = true
 					z.Touches++
 				}
-
 				if inTouch {
 					if bar.Close > z.Top {
-						// Close above zone top → BREACHED, zone is dead
+						// Closed above zone → BREACHED, zone is dead
 						z.Breached = true
 						inTouch = false
 						break
 					}
 					if bar.Close < z.Bottom {
-						// Close back below zone bottom → touch RESPECTED
+						// Bounced back below zone bottom → RESPECTED touch
 						z.Respected++
 						inTouch = false
 					}
-					// close inside zone → still in touch
+					// close still inside zone → remain in touch
 				}
 			}
 		}
