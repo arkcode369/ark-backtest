@@ -14,6 +14,7 @@ import (
 	"time"
 	"trading-backtest-bot/internal/backtest"
 	"trading-backtest-bot/internal/data"
+	"trading-backtest-bot/internal/ictcontext"
 	"trading-backtest-bot/internal/pdarray"
 	"trading-backtest-bot/internal/strategy"
 
@@ -200,6 +201,12 @@ func (b *Bot) handleMessage(msg *tgbotapi.Message) {
 			return
 		}
 		b.handlePDStat(chatID, args)
+	case "ictanalysis":
+		if !b.userLimiter.Allow(chatID, "backtest") {
+			b.send(chatID, "⏳ Please wait before making another request.")
+			return
+		}
+		b.handleICTAnalysis(chatID, args)
 	default:
 		if cmd != "" {
 			b.send(chatID, "\u2753 Unknown command: /"+cmd+"\nUse /help for all available commands.")
@@ -246,6 +253,11 @@ func (b *Bot) sendHelp(chatID int64) {
 		"  _Example:_ `/pdstat XAUUSD 1d period=2y`\n" +
 		"  _Example:_ `/pdstat NQ 1h`\n" +
 		"  _Analyzes: FVG, OB, Breaker, Mitigation, Rejection, IFVG, BPR, VolImbalance_\n\n" +
+		"*🧠 ICT Context Analysis*\n" +
+		"`/ictanalysis SYMBOL INTERVAL [period=1y]` — full ICT market context\n" +
+		"  _Example:_ `/ictanalysis XAUUSD 1d`\n" +
+		"  _Example:_ `/ictanalysis NQ 1h period=90d`\n" +
+		"  _Detects: AMD Phase, Structure, Liquidity, BISI/SIBI, Turtle Soup, Three Drives, CISD_\n\n" +
 		"*🧠 Strategy Builder (AI)*\n" +
 		"`/strategy [topic]` — start AI strategy conversation\n" +
 		"`/endstrategy` — end session\n" +
@@ -1461,6 +1473,59 @@ func (b *Bot) handlePDStat(chatID int64, args string) {
 
 	result := pdarray.Analyze(bars, symbolKey, interval)
 	b.sendMD(chatID, pdarray.FormatResult(result))
+}
+
+// ── /ictanalysis ──────────────────────────────────────────────────────────────
+
+func (b *Bot) handleICTAnalysis(chatID int64, args string) {
+	if args == "" {
+		b.send(chatID, "Usage: /ictanalysis SYMBOL INTERVAL [period=1y]\nExample: /ictanalysis XAUUSD 1d\nExample: /ictanalysis NQ 1h period=90d")
+		return
+	}
+
+	parts := strings.Fields(args)
+	if len(parts) < 2 {
+		b.send(chatID, "❌ Need at least: SYMBOL INTERVAL\nExample: /ictanalysis XAUUSD 1d")
+		return
+	}
+
+	symbolKey := strings.ToUpper(parts[0])
+	interval := strings.ToLower(parts[1])
+
+	opts := parseOptions(parts[2:])
+	period := getOptStr(opts, "period", defaultPeriod(interval))
+
+	// Validate symbol
+	_, ok := data.GetSymbol(symbolKey)
+	if !ok {
+		b.send(chatID, fmt.Sprintf("❌ Unknown symbol: %s\nUse /symbols to see all supported instruments.", symbolKey))
+		return
+	}
+
+	// Validate interval
+	if _, ok := data.ValidIntervals[interval]; !ok {
+		b.send(chatID, fmt.Sprintf("❌ Unsupported interval: %s\nSupported: 1m, 5m, 15m, 30m, 1h, 1d, 1w", interval))
+		return
+	}
+
+	b.send(chatID, fmt.Sprintf("⏳ Fetching %s data (%s, %s) for ICT analysis...", symbolKey, interval, period))
+
+	bars, err := data.FetchOHLCV(b.ctx, data.FetchParams{
+		Symbol:   symbolKey,
+		Interval: interval,
+		Period:   period,
+	})
+	if err != nil {
+		b.send(chatID, fmt.Sprintf("❌ Data fetch error: %v", err))
+		return
+	}
+	if len(bars) < 10 {
+		b.send(chatID, fmt.Sprintf("❌ Not enough data: %d bars. Try a longer period or wider interval.", len(bars)))
+		return
+	}
+
+	ctx := ictcontext.Analyze(bars, symbolKey, interval)
+	b.sendMD(chatID, ictcontext.Format(ctx))
 }
 
 func (b *Bot) handleListFiles(chatID int64) {
